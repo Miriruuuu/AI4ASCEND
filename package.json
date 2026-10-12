@@ -1,0 +1,76 @@
+{
+  "name": "connect4-attack",
+  "version": "0.1.0",
+  "private": true,
+  "description": "3D 四子棋（9x9 连珠对战）—— 可并入 Vue3 + TS 项目的前端游戏模块",
+  "type": "module",
+  "main": "./src/app/useConnectGame.ts",
+  "module": "./src/app/useConnectGame.ts",
+  "types": "./src/app/useConnectGame.ts",
+  "exports": {
+    ".": "./src/app/useConnectGame.ts",
+    "./core": "./src/core/engine.ts",
+    "./core/lines": "./src/core/lines.ts",
+    "./ai": "./src/ai/baseline.ts",
+    "./three": "./src/three/scene-controller.ts",
+    "./ui": "./src/app/App.vue",
+    "./style.css": "./src/app/styles.css"
+  },
+  "files": [
+    "src",
+    "skill",
+    "README.md"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit -p tsconfig.app.json && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && vue-tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "tsx tests/browser-smoke.ts",
+    "verify:bugv3": "tsx scripts/verify-bugv3.ts",
+    "verify:bugv4": "tsx scripts/verify-bugv4.ts",
+    "verify:bugv5": "tsx scripts/verify-bugv5.ts",
+    "verify:bugv6": "tsx scripts/verify-bugv6.ts",
+    "verify:bugv7": "tsx scripts/verify-bugv7.ts",
+    "verify:bugv8": "tsx scripts/verify-bugv8.ts",
+    "verify:bugv9": "tsx scripts/verify-bugv9.ts",
+    "verify:bugv10": "tsx scripts/verify-bugv10.ts",
+    "verify:bugv11": "tsx scripts/verify-bugv11.ts",
+    "verify:bugv28": "node scripts/verify-bugv28.mjs",
+    "verify:bugv29": "node scripts/verify-bugv29.mjs",
+    "verify:bugv30": "node scripts/verify-bugv30.mjs",
+    "verify:bugv31": "node scripts/verify-bugv31.mjs",
+    "verify:bugv34": "node scripts/verify-bugv34.mjs",
+    "verify:layout": "node scripts/verify-panel-layout.mjs",
+    "verify:online": "tsx scripts/verify-online.ts",
+    "verify:online-backend": "node scripts/verify-online-backend.mjs",
+    "verify:online-live": "node scripts/verify-online-live.mjs",
+    "sync:core": "node scripts/sync-core.mjs",
+    "selfplay": "tsx scripts/selfplay.ts"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^25.0.1",
+    "playwright-core": "^1.63.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.0",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.0",
+    "vue": "^3.5.13",
+    "vue-tsc": "^3.1.0"
+  }
+}

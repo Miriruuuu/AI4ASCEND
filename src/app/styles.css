@@ -1,0 +1,5388 @@
+/* =========================================================================
+   四子棋 · 设计令牌与基础样式
+   风格：亮色底、克制留白、细腻的光影与微动效
+   关键约束（bugv1.md）：画布无边界、整体铺满屏幕、没有任何背景圆盘
+   ========================================================================= */
+
+:root {
+  --c-page: #f4f5f7;
+  --c-page-soft: #eceef2;
+  --c-ink: #14171f;
+  --c-ink-dim: rgba(20, 23, 31, 0.62);
+  --c-ink-faint: rgba(20, 23, 31, 0.38);
+  --c-surface: rgba(255, 255, 255, 0.78);
+  --c-surface-strong: rgba(255, 255, 255, 0.94);
+  --c-border: rgba(20, 23, 31, 0.1);
+  --c-border-strong: rgba(20, 23, 31, 0.2);
+  --c-attack: #ff2d3f;
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --shadow-soft: 0 18px 50px rgba(20, 23, 31, 0.12);
+  --shadow-card: 0 10px 30px rgba(20, 23, 31, 0.1);
+  --font-ui: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+  --font-num: 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', ui-monospace, monospace;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--c-page);
+  color: var(--c-ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+kbd {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--c-border);
+  background: rgba(20, 23, 31, 0.05);
+}
+
+/* ---------------------------------------------------------------- 滚动条 */
+/* bugv29 #1：默认滚动条是"黑底灰条"，跟整体风格完全不搭。
+   统一改成"轨道透明、滑块半透明圆角"的细滚动条，亮底暗底都不刺眼。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 137, 158, 0.45) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  /* 3px 透明边框 + padding-box ⇒ 视觉上是一条细的圆角滑块 */
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-color: rgba(128, 137, 158, 0.42);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(128, 137, 158, 0.7);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: rgba(105, 116, 140, 0.85);
+  background-clip: padding-box;
+}
+
+/* ---------------------------------------------------------------- 根容器 */
+
+.app-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  isolation: isolate;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #ffffff, transparent 60%),
+    radial-gradient(90% 70% at 50% 110%, var(--c-page-soft), transparent 65%),
+    var(--c-page);
+}
+
+/* 攻击阶段：整体环境变暗（页面级）
+   注意：这一层在**画布之下**（z-index 0 < 画布 1），所以压暗的是页面背景与“场地”，
+   而悬浮棋子、对撞特效、高光与顶部血条都保持清晰（bugv3 #2）。 */
+.app-root::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 0.6s var(--ease-out);
+  background:
+    radial-gradient(120% 100% at 50% 50%, rgba(6, 8, 14, 0.55) 20%, rgba(6, 8, 14, 0.86) 78%),
+    rgba(6, 8, 14, 0.42);
+}
+
+.app-root.is-dimmed::after {
+  opacity: 1;
+}
+
+/* 黑夜（bugv34 补充）：场地更暗、并透出一层微弱的深红环境光。
+   同样位于画布**之下**（z-index 0），所以只压暗"场地"，棋子显示效果完全不变。 */
+.app-root.is-night::after {
+  opacity: 1;
+  background:
+    radial-gradient(120% 100% at 50% 50%, rgba(38, 8, 12, 0.74) 12%, rgba(10, 3, 6, 0.95) 80%),
+    rgba(14, 4, 8, 0.62);
+}
+
+/* ---------------------------------------------------------------- 画布层 */
+
+/* 棋盘铺满整个屏幕，没有画布边界、没有背景 */
+.board-layer.board-stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  /* bugv10 追加 #5：画布在 HUD 之上，因此悬浮的攻击棋子会盖住立绘（不阻挡视野）。
+     层级关系：压暗层 0 < HUD 2 < 画布 3 < 技能槽 / 菜单 5+ */
+  z-index: 3;
+}
+
+.board-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.board-canvas.is-locked {
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------- HUD */
+
+.hud {
+  position: absolute;
+  top: clamp(12px, 2.4vh, 26px);
+  left: clamp(12px, 2.2vw, 34px);
+  right: clamp(12px, 2.2vw, 34px);
+  /* bugv10 追加 #5：立绘必须在**悬浮棋子下方**（画布 z-index 3），
+     但仍然在压暗层（0）之上，暗场时血条依旧清晰 */
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  pointer-events: none;
+}
+
+.hud > * {
+  /* 立绘只是装饰：指针事件全部透传给下面的画布，避免挡住拖尾 / 落子 */
+  pointer-events: none;
+  width: clamp(180px, 20vw, 244px);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 立绘尺寸（bugv11 追加 #3：比原来大 25%）。
+   定义在根节点上，是因为**技能栏也要读它** —— 技能栏竖直居中，
+   立绘变大后必须晚一点再居中，否则会压在立绘下沿（见 .skill-bar 的 top）。 */
+.app-root {
+  --hud-portrait-w: clamp(150px, min(26vh, 27vw), 250px);
+  --hud-portrait-h: calc(var(--hud-portrait-w) * 1.12);
+  /* 立绘区实际占掉的高度：顶部留白 + 面板内边距 + 血条(12) + 间距(8) + 立绘 */
+  --hud-reserve: calc(clamp(12px, 2.4vh, 26px) + 9px + 20px + var(--hud-portrait-h));
+}
+
+/* bugv10 追加 #5：左侧（先手方）立绘做左右镜像，与右侧形成对峙感 */
+.player-panel[data-player-panel='0'] .portrait__art {
+  transform: scaleX(-1);
+}
+
+.player-panel {
+  position: relative;
+  display: grid;
+  gap: 9px;
+  padding: 14px 16px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  backdrop-filter: blur(16px) saturate(1.1);
+  box-shadow: var(--shadow-card);
+  transition: transform 0.32s var(--ease-out), box-shadow 0.32s var(--ease-out), border-color 0.32s var(--ease-out),
+    background 0.4s var(--ease-out);
+}
+
+/* 攻击阶段：血条要成为“被撞击的目标”，所以不能被压暗（bugv3 #2） */
+.app-root.is-dimmed .player-panel {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 22px 46px -20px rgba(0, 0, 0, 0.75),
+    0 0 60px -30px var(--side-color);
+}
+
+.player-panel.is-active {
+  transform: translateY(-2px);
+  border-color: color-mix(in oklab, var(--side-color) 45%, var(--c-border));
+  box-shadow: var(--shadow-card), 0 0 0 1px color-mix(in oklab, var(--side-color) 22%, transparent),
+    0 16px 38px -20px var(--side-color);
+}
+
+.player-panel.is-attacker {
+  box-shadow: var(--shadow-card), 0 0 0 1px color-mix(in oklab, var(--side-color) 40%, transparent),
+    0 16px 44px -18px var(--side-color);
+}
+
+.player-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: radial-gradient(circle at 32% 26%, color-mix(in oklab, var(--side-color) 55%, #ffffff), var(--side-color) 72%);
+  box-shadow: 0 6px 16px -8px var(--side-color), inset 0 0 10px rgba(255, 255, 255, 0.35);
+}
+
+.player-panel__names {
+  min-width: 0;
+}
+
+.player-panel__name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-panel__tag {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--c-ink-faint);
+}
+
+.hp-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hp-value {
+  font-family: var(--font-num);
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.25s var(--ease-out);
+}
+
+.hp-value.is-low {
+  color: #e0562b;
+}
+
+.hp-value.is-negative {
+  color: #c81428;
+}
+
+.hp-label {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--c-ink-faint);
+}
+
+.hp-bar {
+  position: relative;
+  height: 9px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(20, 23, 31, 0.09);
+}
+
+.hp-bar__fill,
+.hp-bar__damage {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+}
+
+.hp-bar__fill {
+  background: linear-gradient(90deg, var(--side-color), color-mix(in oklab, var(--side-color) 55%, #ffffff));
+  transition: width 0.55s var(--ease-out);
+}
+
+.hp-bar__damage {
+  background: rgba(20, 23, 31, 0.18);
+  transition: width 0.5s var(--ease-out) 0.14s;
+}
+
+.hp-bar.is-hit {
+  animation: hpShake 0.42s var(--ease-out);
+}
+
+.hp-ticks {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  pointer-events: none;
+}
+
+.hp-ticks span {
+  flex: 1;
+  border-right: 1px solid rgba(255, 255, 255, 0.55);
+}
+
+.hp-ticks span:last-child {
+  border-right: none;
+}
+
+.damage-float {
+  position: absolute;
+  right: 16px;
+  top: 42px;
+  font-family: var(--font-num);
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--side-color);
+  pointer-events: none;
+  animation: floatUp 1.1s var(--ease-out) forwards;
+}
+
+@keyframes hpShake {
+  0% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-5px);
+  }
+  40% {
+    transform: translateX(4px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes floatUp {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.85);
+  }
+  25% {
+    opacity: 1;
+    transform: translateY(0) scale(1.06);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-26px) scale(1);
+  }
+}
+
+/* ------------------------------------------------ 攻击数（bugv3 #6） */
+
+/* 位置由 3D 层每帧写入（贴着悬浮棋子），这里只负责发光字体 */
+.tally-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.tally {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  opacity: 0;
+  will-change: transform, opacity;
+  transition: opacity 0.34s var(--ease-out);
+}
+
+.tally.is-visible {
+  opacity: 1;
+}
+
+.tally__label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  text-indent: 0.32em;
+  color: color-mix(in oklab, var(--side-color) 62%, #ffffff);
+  text-shadow: 0 0 12px color-mix(in oklab, var(--side-glow) 75%, transparent);
+}
+
+.tally__value {
+  display: block;
+  font-family: var(--font-num);
+  /* bugv8 #6：字号加大、笔画更细、字形更修长 */
+  font-size: calc(46px * var(--tally-scale, 1));
+  font-weight: 200;
+  line-height: 0.94;
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
+  text-shadow: 0 0 6px color-mix(in oklab, var(--side-glow) 92%, transparent), 0 0 16px var(--side-color),
+    0 0 calc(24px + var(--tally-weight, 0) * 36px) color-mix(in oklab, var(--side-color) 88%, transparent);
+}
+
+/* 数字本体单独缩放：外层 transform 被 3D 层每帧写位置，不能占用 */
+.tally__glyph {
+  display: inline-block;
+  scale: 0.88 1.22;
+  transform-origin: 50% 55%;
+  letter-spacing: 0.02em;
+}
+
+.tally.is-visible .tally__value {
+  animation: tallyGlow 1.9s ease-in-out infinite;
+}
+
+@keyframes tallyGlow {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.24);
+  }
+}
+
+/* ---------------------------------------------------------------- 开始菜单 */
+
+/* 首页的模式选择（人机 / 双人 / AI 对战） */
+.start-menu__modes {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(10px);
+}
+
+.mode-chip {
+  flex: 1;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  color: var(--c-ink-dim);
+  white-space: nowrap;
+  transition: color 0.22s var(--ease-out), background 0.22s var(--ease-out), box-shadow 0.22s var(--ease-out);
+}
+
+.mode-chip:hover {
+  color: var(--c-ink);
+}
+
+.mode-chip.is-active {
+  color: #fff;
+  background: linear-gradient(135deg, #2b3040, var(--c-ink));
+  box-shadow: 0 8px 20px -12px rgba(20, 23, 31, 0.8);
+}
+
+.start-menu__hint {
+  margin: -6px 0 0;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--c-ink-faint);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- 骰子 */
+
+.dice-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 18px;
+  justify-items: center;
+  pointer-events: none;
+  z-index: 7;
+}
+
+.dice-pair {
+  display: flex;
+  gap: clamp(16px, 4vw, 40px);
+}
+
+.dice {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 6px;
+  width: clamp(60px, 8vw, 88px);
+  height: clamp(60px, 8vw, 88px);
+  padding: 10px;
+  border-radius: 18px;
+  border: 1px solid var(--c-border);
+  background: linear-gradient(155deg, #ffffff, #eef0f4);
+  box-shadow: 0 20px 40px -18px rgba(20, 23, 31, 0.4), inset 0 1px 0 #fff;
+}
+
+.dice.is-rolling {
+  animation: diceRoll 0.42s linear infinite;
+}
+
+.dice.is-winner {
+  border-color: var(--side-color);
+  box-shadow: 0 0 30px -10px var(--side-color), 0 20px 40px -18px rgba(20, 23, 31, 0.4);
+  animation: winnerPop 0.6s var(--ease-out);
+}
+
+.dice__pip {
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 30%, #4a4f5c, #1b1e26 70%);
+  opacity: 0;
+  transform: scale(0.4);
+  transition: opacity 0.14s linear, transform 0.14s var(--ease-out);
+}
+
+.dice__pip.is-on {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.dice-caption {
+  font-size: 12.5px;
+  letter-spacing: 0.2em;
+  color: var(--c-ink-dim);
+}
+
+.dice-caption strong {
+  color: var(--c-ink);
+  font-weight: 600;
+}
+
+@keyframes diceRoll {
+  0% {
+    transform: rotate(-9deg) translateY(0);
+  }
+  50% {
+    transform: rotate(7deg) translateY(-8px);
+  }
+  100% {
+    transform: rotate(-9deg) translateY(0);
+  }
+}
+
+@keyframes winnerPop {
+  0% {
+    transform: scale(1);
+  }
+  42% {
+    transform: scale(1.16);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ---------------------------------------------------------------- 攻击结算卡 */
+
+/* 结算卡放在**左下角**：右侧／上方要留给悬浮的攻击棋子与血条（bugv4 #3） */
+.attack-card {
+  position: absolute;
+  /* bugv26 #3：回到自然的左边距（与顶部立绘 / 技能槽同一列）。
+     以前为了避开技能槽整体右移 118px，现在①技能槽的 top 改成读**实测** HUD 下沿
+     ②面板自己用 `--attack-card-max-h` 封顶（见 `refreshHudRects`），
+     两者再也不会互相压住，所以不再需要横向偏移。 */
+  left: clamp(14px, 2.4vw, 38px);
+  bottom: clamp(12px, 2.4vh, 30px);
+  width: clamp(196px, 15.5vw, 232px);
+  /* 短窗口下往上顶会进技能槽 ⇒ 由实测的"技能槽下沿"封顶，超出时面板内部滚动 */
+  max-height: var(--attack-card-max-h, 46vh);
+  overflow-y: auto;
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px 11px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(18px);
+  box-shadow: var(--shadow-card);
+  animation: cardIn 0.32s var(--ease-out);
+  z-index: 6;
+}
+
+.attack-card__title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--c-ink-faint);
+  text-transform: uppercase;
+}
+
+.attack-card__dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--c-attack);
+  box-shadow: 0 0 10px var(--c-attack);
+  animation: pulseDot 1.2s ease-in-out infinite;
+}
+
+.attack-stats {
+  display: grid;
+  /* bugv26 #3：两列排布 —— 单列在短窗口下会把面板撑得过高，顶进技能槽。
+     每格仍是"标签左 / 数值右"，只是行数减半。 */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 10px;
+}
+
+.stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.stat__label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--c-ink-faint);
+}
+
+.stat__value {
+  font-family: var(--font-num);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stat__value.is-accent {
+  color: var(--side-color);
+}
+
+.stat__value.is-dim {
+  color: var(--c-ink-faint);
+}
+
+/* bugv25 #3：增伤明细（小一哥 / 深度思考 / 毒鸡蛋） */
+.stat__value.is-bonus {
+  color: #b4471f;
+}
+
+.stat__label.is-bonus {
+  color: #b4471f;
+}
+
+/* 魔力植物加成（bugv8 #4） */
+.stat__value.is-magic {
+  color: #7c8ba1;
+  text-shadow: 0 0 10px rgba(190, 212, 245, 0.9);
+}
+
+.stat__tag {
+  padding: 0 5px;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  color: #b4471f;
+  background: rgba(216, 92, 40, 0.14);
+}
+
+/* bugv34d：结算面板里的「天气增减伤」明细（雷暴 +2 / 干涸 −1 / 枯竭与暴雪不加伤） */
+.stat__label.is-weather {
+  color: #6d28d9;
+}
+
+.stat__value.is-weather-up {
+  color: #b4471f;
+}
+
+.stat__value.is-weather-down {
+  color: #1d6fa5;
+}
+
+.stat--op {
+  display: none;
+}
+
+.attack-card__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--c-ink-dim);
+  padding-top: 7px;
+  border-top: 1px solid var(--c-border);
+}
+
+/* bugv34：天气改写攻防数值时的提示（如「瘟疫」） */
+.attack-card__weather {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #076b34;
+  background: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseDot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+/* ---------------------------------------------------------------- 联机大厅（bugv6 #8） */
+
+/**
+ * ⚠️ 选择器写成复合的 `.start-menu__inner.online-lobby`（特异性 0,2,0）：
+ * 大厅复用开始菜单的面板类，而宽屏下 `.start-menu__inner` 是**两栏网格**
+ * （`minmax(0,1fr) minmax(286px,340px)`，见文件后半段）。特异性不够高的规则会被它盖掉，
+ * 于是宽屏（> 1000px）时大厅被拆成两栏：标题 / 提示落在左边那一大栏、按钮落在右边，
+ * 左侧就出现一大片空白（bugv11 追加 #8 修的就是这个）。这里强制单栏。
+ */
+.start-menu__inner.online-lobby {
+  width: min(420px, 92vw);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 大厅自己排一下顺序（窄屏时 .start-menu__* 会按 order 重排，这里的元素必须一起参与，
+   否则状态 / 提示会跑到标题上面去） */
+.online-lobby .start-menu__brand {
+  order: 1;
+}
+
+.online-lobby__status {
+  order: 2;
+}
+
+.online-lobby__code {
+  order: 3;
+}
+
+.online-lobby__tip {
+  order: 4;
+}
+
+.online-lobby__message {
+  order: 5;
+}
+
+.online-lobby .start-menu__actions {
+  order: 6;
+}
+
+.online-lobby .start-menu__footer {
+  order: 7;
+}
+
+.online-lobby__input {
+  width: 100%;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--c-ink);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.72);
+  outline: none;
+}
+
+.online-lobby__input:focus {
+  border-color: var(--c-border-strong);
+  background: #fff;
+}
+
+.online-lobby__input--code {
+  font-family: var(--font-num);
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.online-lobby__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--c-ink-dim);
+}
+
+.online-lobby__opponent {
+  margin-left: auto;
+  color: var(--c-ink-faint);
+}
+
+.online-lobby__code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--c-border-strong);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.online-lobby__code-label {
+  font-size: 10.5px;
+  letter-spacing: 0.2em;
+  color: var(--c-ink-faint);
+}
+
+.online-lobby__code-value {
+  flex: 1;
+  font-family: var(--font-num);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--c-ink);
+}
+
+.online-lobby__join {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.online-lobby__join .primary-btn {
+  flex-shrink: 0;
+  padding: 9px 18px;
+}
+
+.online-lobby__message {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--c-ink-faint);
+  text-align: center;
+}
+
+.online-lobby__message.is-error {
+  color: #c81428;
+}
+
+.online-lobby__tip {
+  margin: -8px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--c-ink-faint);
+  text-align: center;
+}
+
+.online-dot.is-bad {
+  background: #d8283c;
+  box-shadow: 0 0 10px rgba(216, 40, 60, 0.55);
+}
+
+.link-btn {
+  font-size: 11.5px;
+  color: var(--c-ink-faint);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: color 0.18s var(--ease-out);
+}
+
+.link-btn:hover {
+  color: var(--c-ink);
+}
+
+/* ---------------------------------------------------------------- 状态条 */
+.status-strip {
+  position: absolute;
+  top: clamp(16px, 3vh, 34px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: calc(100% - 620px);
+  padding: 7px 16px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surface);
+  backdrop-filter: blur(14px);
+  z-index: 6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-strip__side {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--side-color);
+  box-shadow: 0 0 10px var(--side-color);
+}
+
+/* bugv28 #4：联机倒计时（状态条内） */
+.status-strip__timer {
+  margin-left: 4px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #eef2ff;
+  border-radius: 999px;
+  background: rgba(29, 33, 48, 0.82);
+  transition: background 0.2s var(--ease-out);
+}
+
+.status-strip__timer.is-urgent {
+  color: #fff;
+  background: #d6342f;
+  animation: timerPulse 0.9s var(--ease-out) infinite;
+}
+
+@keyframes timerPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* 攻击阶段状态条同样保持清晰（bugv3 #2） */
+.app-root.is-dimmed .status-strip {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* ------------------------------------------------------ bugv34 黑夜与天气 */
+/* 黑夜预告：显示在回合标识上方 */
+.night-warning {
+  position: absolute;
+  top: clamp(2px, 1.1vh, 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #ffe9ec;
+  background: rgba(110, 15, 26, 0.86);
+  border: 1px solid rgba(255, 92, 106, 0.55);
+  border-radius: 999px;
+  box-shadow: 0 0 18px rgba(170, 20, 36, 0.5);
+  animation: nightWarnPulse 1.4s var(--ease-out) infinite;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@keyframes nightWarnPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+/* 当前天气：棋盘下方居中 */
+.weather-bar {
+  position: absolute;
+  bottom: clamp(14px, 3vh, 34px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.weather-chip {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--weather-color, #fff);
+  border: 1px solid var(--weather-color, rgba(255, 255, 255, 0.5));
+  border-radius: 999px;
+  background: rgba(12, 14, 20, 0.72);
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+  transition: transform 0.16s var(--ease-out), box-shadow 0.16s var(--ease-out);
+}
+
+.weather-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 18px var(--weather-color, rgba(255, 255, 255, 0.4));
+}
+
+.weather-chip__dot,
+.weather-detail__dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--weather-color, #fff);
+  box-shadow: 0 0 10px var(--weather-color, #fff);
+}
+
+/* 天气详情：桌面居中气泡 */
+.weather-detail {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 10, 16, 0.42);
+  backdrop-filter: blur(3px);
+}
+
+.weather-detail__card {
+  width: min(420px, 100%);
+  padding: 18px 20px 20px;
+  border-radius: 18px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.weather-detail__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: var(--weather-color, #fff);
+}
+
+.weather-detail__head h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: 0.08em;
+}
+
+.weather-detail__body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--c-ink);
+}
+
+/* 手机端：天气详情改底部抽屉（bugv34） */
+@media (max-width: 720px) {
+  .weather-detail {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .weather-detail__card {
+    width: 100%;
+    border-radius: 18px 18px 0 0;
+    padding: 20px 20px 28px;
+  }
+}
+
+/* ---------------------------------------------------------------- 右下角按钮 */
+
+/* 右下角侧边停靠区：微型播放器在上、设置按钮在下（bugv9 #7）。 */
+.side-dock {
+  position: absolute;
+  right: clamp(14px, 2.4vw, 38px);
+  bottom: clamp(14px, 2.6vh, 30px);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.side-dock .corner-btn {
+  position: static;
+  right: auto;
+  bottom: auto;
+}
+
+/* --- 微型播放器（bugv9 #7） --- */
+
+.mini-player {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.mini-player__handle {
+  position: relative;
+  display: grid;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 2px;
+  height: 34px;
+  padding: 0 9px 0 4px;
+  border-radius: 999px;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-card);
+  transition: color 0.22s var(--ease-out), transform 0.22s var(--ease-out);
+}
+
+.mini-player__handle:hover {
+  color: var(--c-ink);
+  transform: translateY(-1px);
+}
+
+.mini-player__handle-arrow {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  color: var(--c-ink-faint);
+  transition: transform 0.28s var(--ease-out);
+}
+
+.mini-player__handle-arrow.is-open {
+  transform: rotate(180deg);
+}
+
+.mini-player__handle-icon {
+  display: grid;
+  place-items: center;
+}
+
+.mini-player__pulse {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #35c07a;
+  box-shadow: 0 0 8px #35c07a;
+  animation: miniPulse 1.6s var(--ease-out) infinite;
+}
+
+@keyframes miniPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.mini-player__panel {
+  display: grid;
+  gap: 8px;
+  width: min(238px, 74vw);
+  padding: 11px 13px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(18px) saturate(1.1);
+  box-shadow: var(--shadow-soft);
+  transform-origin: bottom right;
+}
+
+.mini-player-pop-enter-active,
+.mini-player-pop-leave-active {
+  transition: opacity 0.22s var(--ease-out), transform 0.24s var(--ease-out);
+}
+
+.mini-player-pop-enter-from,
+.mini-player-pop-leave-to {
+  opacity: 0;
+  transform: translate(10px, 8px) scale(0.94);
+}
+
+.mini-player__meta {
+  min-width: 0;
+}
+
+.mini-player__name {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-player__sub {
+  margin-top: 2px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--c-ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-player__controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.mini-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.6);
+  transition: transform 0.18s var(--ease-out), color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+}
+
+.mini-btn:hover {
+  color: var(--c-ink);
+  transform: translateY(-1px);
+}
+
+.mini-btn--primary {
+  width: 34px;
+  height: 34px;
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(120deg, #1d2130, #333a4d);
+}
+
+.mini-btn--ghost {
+  width: 24px;
+  height: 24px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.mini-player__volume {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mini-player__range {
+  flex: 1;
+  height: 22px;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mini-player__range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--c-ink) 0%,
+    var(--c-ink) var(--progress, 50%),
+    rgba(20, 23, 31, 0.14) var(--progress, 50%),
+    rgba(20, 23, 31, 0.14) 100%
+  );
+}
+
+.mini-player__range::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid rgba(20, 23, 31, 0.28);
+  box-shadow: 0 2px 6px -2px rgba(20, 23, 31, 0.6);
+}
+
+.mini-player__percent {
+  width: 30px;
+  text-align: right;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-ink-faint);
+}
+
+.mini-player__tip {
+  font-size: 10px;
+  color: var(--c-ink-faint);
+}
+
+/* --- 音效风格选择（bugv9 #10） --- */
+
+.sound-styles {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-field__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sound-style-row {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px dashed var(--c-border);
+}
+
+.sound-style-row:first-of-type {
+  border-top: none;
+}
+
+.sound-style-row__label {
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+}
+
+.sound-style-row__styles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.style-chip {
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.62);
+  transition: color 0.18s var(--ease-out), border-color 0.18s var(--ease-out), background 0.18s var(--ease-out),
+    transform 0.18s var(--ease-out);
+}
+
+.style-chip:hover {
+  color: var(--c-ink);
+  transform: translateY(-1px);
+}
+
+.style-chip.is-active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(120deg, #1d2130, #3a4256);
+}
+
+.corner-btn {
+  position: absolute;
+  right: clamp(14px, 2.4vw, 38px);
+  bottom: clamp(14px, 2.6vh, 30px);
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-card);
+  transition: transform 0.24s var(--ease-out), color 0.24s var(--ease-out), box-shadow 0.24s var(--ease-out);
+}
+
+.corner-btn:hover {
+  color: var(--c-ink);
+  transform: translateY(-2px) rotate(24deg);
+  box-shadow: var(--shadow-card), 0 10px 24px -14px rgba(20, 23, 31, 0.5);
+}
+
+/* ---------------------------------------------------------------- 开始菜单 */
+
+.start-menu {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.start-menu__inner {
+  pointer-events: auto;
+  width: min(380px, 92vw);
+  display: grid;
+  gap: 22px;
+  padding: 30px 28px 24px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(22px) saturate(1.15);
+  box-shadow: var(--shadow-soft);
+  animation: menuIn 0.5s var(--ease-out);
+}
+
+.start-menu__brand h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+}
+
+.start-menu__brand p {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  letter-spacing: 0.24em;
+  color: var(--c-ink-faint);
+  text-transform: uppercase;
+}
+
+.start-menu__actions {
+  display: grid;
+  /* bugv30 #1：动作按钮一行两个（主按钮 `.menu-btn--wide` 整行通栏） */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.menu-btn--wide {
+  grid-column: 1 / -1;
+}
+
+.menu-btn {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 13px 18px;
+  text-align: left;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.6);
+  transition: transform 0.2s var(--ease-out), border-color 0.2s var(--ease-out), background 0.2s var(--ease-out),
+    box-shadow 0.2s var(--ease-out);
+}
+
+.menu-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--c-border-strong);
+  background: #fff;
+  box-shadow: 0 10px 24px -16px rgba(20, 23, 31, 0.5);
+}
+
+.menu-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.menu-btn__label {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.menu-btn__meta {
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+.menu-btn--primary {
+  border-color: transparent;
+  color: #fff;
+  background: linear-gradient(120deg, #1d2130, #333a4d);
+  box-shadow: 0 14px 30px -18px rgba(20, 23, 31, 0.9);
+}
+
+.menu-btn--primary .menu-btn__meta {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.menu-btn--primary:hover:not(:disabled) {
+  background: linear-gradient(120deg, #232839, #3b4358);
+}
+
+.start-menu__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+/* ---------------------------------------------------------------- 一次性提示（bugv8 #3） */
+
+.overlay--notice {
+  z-index: 12;
+}
+
+.notice {
+  width: min(400px, 92vw);
+  justify-items: start;
+  text-align: left;
+  border-color: rgba(216, 92, 40, 0.32);
+}
+
+.notice__icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: #d85c28;
+  background: rgba(216, 92, 40, 0.12);
+}
+
+.notice.is-info {
+  border-color: var(--c-border);
+}
+
+.notice.is-info .notice__icon {
+  color: #2b6cd6;
+  background: rgba(43, 108, 214, 0.12);
+}
+
+/* ---------------------------------------------------------------- 覆盖层 / 弹窗 */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(10, 12, 18, 0.34);
+  backdrop-filter: blur(6px);
+  animation: fadeIn 0.26s var(--ease-out);
+}
+
+.overlay--menu {
+  z-index: 8;
+}
+
+.modal {
+  /* bugv10 追加 #1：按钮从 3 个变 4 个后被挤扁 —— 弹窗放宽，按钮走两行 */
+  width: min(560px, 94vw);
+  padding: 24px 24px 20px;
+  display: grid;
+  gap: 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-soft);
+  animation: modalIn 0.36s var(--ease-out);
+}
+
+.modal__title {
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  color: var(--c-ink-faint);
+  text-transform: uppercase;
+}
+
+.modal__headline {
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.modal__headline em {
+  font-style: normal;
+  color: var(--side-color);
+}
+
+.modal__body {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--c-ink-dim);
+}
+
+.modal__actions {
+  /* bugv10 追加 #1：4 个按钮排成 2×2，谁也不被挤扁 */
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.modal__actions > * {
+  width: 100%;
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+@media (max-width: 460px) {
+  .modal__actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.game-menu {
+  width: min(360px, 92vw);  display: grid;
+  gap: 18px;
+  padding: 24px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(22px);
+  box-shadow: var(--shadow-soft);
+  animation: modalIn 0.34s var(--ease-out);
+}
+
+.game-menu__title {
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  color: var(--c-ink-faint);
+  text-transform: uppercase;
+}
+
+.game-menu__sub {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.game-menu__actions {
+  display: grid;
+  gap: 9px;
+}
+
+.game-menu__players {
+  display: flex;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--c-ink-faint);
+  border-top: 1px solid var(--c-border);
+  padding-top: 12px;
+}
+
+.game-menu__player {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.game-menu__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.primary-btn {
+  padding: 10px 22px;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  color: #fff;
+  background: linear-gradient(120deg, #1d2130, #333a4d);
+  box-shadow: 0 12px 26px -16px rgba(20, 23, 31, 0.9);
+  transition: transform 0.18s var(--ease-out);
+}
+
+.primary-btn:hover {
+  transform: translateY(-1px);
+}
+
+.ghost-btn {
+  padding: 8px 16px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+  transition: color 0.18s var(--ease-out), border-color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+}
+
+.ghost-btn:hover {
+  color: var(--c-ink);
+  border-color: var(--c-border-strong);
+  background: #fff;
+}
+
+.ghost-btn.is-active {
+  color: #fff;
+  border-color: transparent;
+  background: #1d2130;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.6);
+  transition: color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+}
+
+.icon-btn:hover {
+  color: var(--c-ink);
+  background: #fff;
+}
+
+/* ---------------------------------------------------------------- 设置面板 */
+
+/* bugv6 #1：左侧分节 + 右侧内容的现代化设置弹窗 */
+.settings-dialog {
+  width: min(760px, 94vw);
+  max-height: min(640px, 88vh);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(22px) saturate(1.12);
+  box-shadow: var(--shadow-soft);
+  animation: modalIn 0.34s var(--ease-out);
+  overflow: hidden;
+}
+
+.settings-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.settings-dialog__eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.32em;
+  color: var(--c-ink-faint);
+}
+
+.settings-dialog__title {
+  margin: 4px 0 0;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.settings-dialog__body {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.settings-dialog__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.settings-dialog__tip {
+  font-size: 11.5px;
+  color: var(--c-ink-faint);
+}
+
+/* 左侧分节导航 */
+.settings-nav {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 14px 12px;
+  border-right: 1px solid var(--c-border);
+  background: rgba(20, 23, 31, 0.035);
+  overflow-y: auto;
+}
+
+.settings-nav__item {
+  display: grid;
+  gap: 1px;
+  padding: 9px 12px;
+  text-align: left;
+  border-radius: 10px;
+  color: var(--c-ink-dim);
+  transition: color 0.2s var(--ease-out), background 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+}
+
+.settings-nav__item:hover {
+  color: var(--c-ink);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.settings-nav__item.is-active {
+  color: #fff;
+  background: linear-gradient(130deg, #1d2130, #333a4d);
+  box-shadow: 0 10px 22px -16px rgba(20, 23, 31, 0.9);
+}
+
+.settings-nav__label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.settings-nav__caption {
+  font-size: 10.5px;
+  opacity: 0.68;
+}
+
+/* 右侧内容 */
+.settings-pane {
+  min-height: 320px;
+  padding: 20px 22px;
+  overflow-y: auto;
+}
+
+.settings-pane__section {
+  display: grid;
+  gap: 16px;
+  animation: paneIn 0.28s var(--ease-out);
+}
+
+.settings-pane__head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.settings-pane__head p {
+  margin: 5px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-ink-faint);
+}
+
+@keyframes paneIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.settings-field {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-field__label {
+  font-size: 11.5px;
+  letter-spacing: 0.1em;
+  color: var(--c-ink-dim);
+}
+
+.settings-note {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--c-ink-faint);
+}
+
+/* 黑夜规则说明列表（bugv34d：把完整规则写在设置面板里） */
+.settings-rules {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--c-ink-dim);
+}
+
+.settings-rules b {
+  color: var(--c-ink);
+}
+
+.settings-note-inline {
+  display: inline;
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+.settings-note code {
+  font-family: var(--font-num);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(20, 23, 31, 0.06);
+}
+
+/* --------------------------------------------------------------------------
+   bugv34m：独立开关（设置 → 黑夜：把「黑夜」与「开局即黑夜」拆成两个开关）
+   -------------------------------------------------------------------------- */
+
+.settings-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 整行都是按钮：点哪儿都能切换，右侧是开关本体 */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 12px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.toggle-row:hover {
+  border-color: var(--c-border-strong);
+}
+
+.toggle-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.toggle-row__title {
+  font-size: 12.5px;
+  color: var(--c-ink);
+}
+
+.toggle-row__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--c-ink-faint);
+}
+
+.toggle-switch {
+  flex: none;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border-strong);
+  background: rgba(20, 23, 31, 0.14);
+  transition: background 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
+}
+
+.toggle-switch__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(20, 23, 31, 0.3);
+  transition: transform 0.18s var(--ease-out);
+}
+
+.toggle-switch.is-on {
+  border-color: rgba(38, 108, 178, 0.55);
+  background: linear-gradient(120deg, #2f6bff, #16233f);
+}
+
+.toggle-switch.is-on .toggle-switch__knob {
+  transform: translateX(18px);
+}
+
+/* 魔力植物参数行（bugv8 #4） */
+.magic-field {
+  grid-template-columns: minmax(0, 1fr) 84px;
+  align-items: center;
+  gap: 12px;
+}
+
+.magic-field__text {
+  display: grid;
+  gap: 2px;
+}
+
+.magic-field__input {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-family: var(--font-num);
+  font-size: 13px;
+  text-align: center;
+  color: var(--c-ink);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.78);
+  outline: none;
+}
+
+.magic-field__input:focus {
+  border-color: var(--c-border-strong);
+  background: #fff;
+}
+
+/* 选项卡片（模式 / 难度） */
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.choice {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+  text-align: left;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.62);
+  transition: transform 0.18s var(--ease-out), border-color 0.18s var(--ease-out), background 0.18s var(--ease-out),
+    box-shadow 0.18s var(--ease-out);
+}
+
+.choice:hover {
+  transform: translateY(-1px);
+  background: #fff;
+  box-shadow: 0 10px 22px -18px rgba(20, 23, 31, 0.6);
+}
+
+.choice.is-active {
+  border-color: color-mix(in oklab, var(--c-ink) 72%, transparent);
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(20, 23, 31, 0.5), 0 12px 24px -18px rgba(20, 23, 31, 0.8);
+}
+
+.choice__label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.choice__hint {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--c-ink-faint);
+}
+
+/* 下拉框（bugv6 #2：背景音乐） */
+.select {
+  position: relative;
+  display: block;
+}
+
+.select__input {
+  appearance: none;
+  width: 100%;
+  padding: 10px 38px 10px 13px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--c-ink);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.78);
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+}
+
+.select__input:hover {
+  background: #fff;
+}
+
+.select__input:focus {
+  border-color: var(--c-border-strong);
+  background: #fff;
+}
+
+.select__arrow {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 9px;
+  height: 9px;
+  margin-top: -6px;
+  border-right: 1.6px solid var(--c-ink-dim);
+  border-bottom: 1.6px solid var(--c-ink-dim);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+/* 联机状态 */
+.online-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.online-dot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--c-ink-faint);
+}
+
+.online-dot.is-ok {
+  background: #17a673;
+  box-shadow: 0 0 10px rgba(23, 166, 115, 0.6);
+}
+
+.online-dot.is-busy {
+  background: #e0a012;
+  box-shadow: 0 0 10px rgba(224, 160, 18, 0.6);
+  animation: pulseDot 1.1s ease-in-out infinite;
+}
+
+.online-status {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--c-ink-dim);
+}
+
+/* 分段控件在网格里不要被拉满整行 */
+.settings-field .segmented,
+.settings-pane__section .segmented {
+  justify-self: start;
+}
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.12);
+  transition: transform 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
+}
+
+.swatch:hover {
+  transform: scale(1.08);
+}
+
+.swatch.is-active {
+  border-color: var(--c-ink);
+  transform: scale(1.1);
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: rgba(20, 23, 31, 0.04);
+}
+
+.segmented button {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--c-ink-dim);
+  border-radius: 999px;
+  transition: color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+}
+
+.segmented button.is-active {
+  color: #fff;
+  background: #1d2130;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field input {
+  width: 100%;
+  padding: 9px 12px;
+  font: inherit;
+  color: var(--c-ink);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.7);
+  outline: none;
+}
+
+.field input:focus {
+  border-color: var(--c-border-strong);
+}
+
+.rules {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--c-ink-dim);
+}
+
+.rules b {
+  color: var(--c-ink);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 回放面板 */
+
+/**
+ * bugv9 #9：回放面板挪到**右下角**，并且可以折叠。
+ *
+ * 之前是底部居中 560px 宽的大卡片，正好压在棋盘中下部。现在贴着右侧边缘、
+ * 宽度收窄，还留出右侧停靠区（播放器 / 设置按钮）的空间，不再挡棋盘。
+ */
+.replay-panel {
+  position: absolute;
+  /* bugv25 #1：面板原先贴在最右边，和**右侧技能槽**重叠（窄屏更糟，见下方媒体查询里
+     那条 `width: calc(100vw - 20px)` 直接铺满整屏 ⇒ 左右技能框全被盖住）。
+     现在统一挪到技能槽**内侧**：偏移 = 技能槽左边距 + 最宽槽(100px) + 18px 间隙。 */
+  right: calc(clamp(10px, 1.6vw, 26px) + 118px);
+  bottom: 108px;
+  z-index: 9;
+  width: min(330px, calc(100vw - 160px));
+  max-height: min(74vh, 640px);
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
+  padding: 14px 15px 15px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-soft);
+  animation: panelIn 0.32s var(--ease-out);
+}
+
+.replay-panel.is-collapsed {
+  gap: 0;
+  padding: 10px 13px;
+  width: min(268px, calc(100vw - 160px));
+}
+
+@keyframes panelIn {
+  from {
+    opacity: 0;
+    transform: translate(12px, 10px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(0, 0);
+  }
+}
+
+.replay-panel__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.replay-panel__heading {
+  min-width: 0;
+}
+
+.replay-panel__head-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.replay-panel__note {
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--c-ink-faint);
+}
+
+.replay-panel__code-toggle {
+  justify-self: start;
+}
+
+.replay-panel__code {
+  display: grid;
+  gap: 6px;
+}
+
+.replay-panel__textarea {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--c-ink-dim);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.66);
+  resize: vertical;
+  outline: none;
+  word-break: break-all;
+}
+
+.replay-panel__textarea:focus {
+  border-color: var(--c-border-strong);
+}
+
+.replay-panel__code-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.replay-panel__title {
+  font-size: 11px;
+  letter-spacing: 0.24em;
+  color: var(--c-ink-faint);
+  text-transform: uppercase;
+}
+
+.replay-panel__sub {
+  font-size: 12px;
+  color: var(--c-ink-dim);
+  margin-top: 3px;
+}
+
+.replay-panel__move {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.replay-panel__range {
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #1d2130 0%,
+    #1d2130 var(--progress, 0%),
+    rgba(20, 23, 31, 0.12) var(--progress, 0%),
+    rgba(20, 23, 31, 0.12) 100%
+  );
+  outline: none;
+}
+
+.replay-panel__range::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #1d2130;
+  cursor: pointer;
+}
+
+.replay-panel__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.replay-panel__list {
+  display: grid;
+  gap: 6px;
+  max-height: 128px;
+  overflow-y: auto;
+  border-top: 1px solid var(--c-border);
+  padding-top: 10px;
+}
+
+.replay-panel__list-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  color: var(--c-ink-faint);
+  text-transform: uppercase;
+}
+
+.replay-panel__empty {
+  padding: 10px 4px;
+  font-size: 11.5px;
+  color: var(--c-ink-faint);
+}
+
+/* 本地 / 服务器两个来源（bugv6 #4） */
+.replay-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: rgba(20, 23, 31, 0.04);
+}
+
+.replay-tabs__item {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+  border-radius: 999px;
+  transition: color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+}
+
+.replay-tabs__item.is-active {
+  color: #fff;
+  background: #1d2130;
+}
+
+.replay-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.replay-row .replay-chip {
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-btn--sm {
+  width: 26px;
+  height: 26px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.replay-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 11.5px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.5);
+  transition: background 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
+}
+
+.replay-chip:hover {
+  background: #fff;
+}
+
+.replay-chip.is-active {
+  border-color: var(--c-ink);
+  background: #fff;
+}
+
+.replay-chip__meta {
+  color: var(--c-ink-faint);
+}
+
+/* ---------------------------------------------------------------- 降级提示 */
+
+.fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+  color: var(--c-ink-dim);
+  z-index: 5;
+}
+
+.fallback h2 {
+  margin: 0;
+  font-size: 17px;
+  color: var(--c-ink);
+  letter-spacing: 0.06em;
+}
+
+/* ---------------------------------------------------------------- 动画 */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes menuIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s var(--ease-out);
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* ---------------------------------------------------------------- 窄屏 */
+
+@media (max-width: 900px) {
+  .hud {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    gap: 8px;
+  }
+
+  .hud > * {
+    width: min(46vw, 200px);
+  }
+  .player-panel {
+    gap: 6px;
+    padding: 10px 12px;
+  }
+
+  .avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 12px;
+  }
+
+  .player-panel__name {
+    font-size: 12.5px;
+  }
+
+  .hp-value {
+    font-size: 21px;
+  }
+
+  .hp-label {
+    display: none;
+  }
+
+  .status-strip {
+    top: auto;
+    bottom: 14px;
+    max-width: calc(100% - 28px);
+    font-size: 11px;
+  }
+
+  .attack-card {
+    left: 10px;
+    right: 10px;
+    top: auto;
+    bottom: 58px;
+    width: auto;
+  }
+
+  .corner-btn {
+    right: 10px;
+    bottom: 10px;
+  }
+
+  .start-menu__inner {
+    padding: 24px 20px 20px;
+  }
+
+  .start-menu__brand h1 {
+    font-size: 24px;
+  }
+
+  .replay-panel {
+    bottom: 10px;
+    /* bugv25 #1：**不要**铺满整屏 —— 那会把左右两侧技能槽整个盖住。
+       宽度交给上面那条规则（min(330px, calc(100vw - 160px))），这里只调纵向位置。 */
+  }
+
+  /* 设置弹窗：窄屏把左侧分节折到顶部，横向滚动 */
+  .settings-dialog {
+    width: calc(100vw - 20px);
+    max-height: 88vh;
+  }
+
+  .settings-dialog__body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings-nav {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--c-border);
+    padding: 10px;
+  }
+
+  .settings-nav__item {
+    flex: 0 0 auto;
+    padding: 7px 12px;
+  }
+
+  .settings-nav__caption {
+    display: none;
+  }
+
+  .settings-pane {
+    min-height: 0;
+    padding: 16px;
+  }
+}
+
+/* ==========================================================================
+   角色系统（bugv9 #13）
+   ========================================================================== */
+
+/* --- 立绘 + 血条（左右上角，只保留这两样） --- */
+
+/* bugv10 #6：立绘长宽各增加 200%（3 倍），血条挪到立绘**上方**并与立绘**等宽**。
+   bugv11 追加 #3：再放大 25%（尺寸变量在 .app-root 上，技能栏也要用它算避让）。 */
+.player-panel {
+  --portrait-w: var(--hud-portrait-w);
+  --portrait-h: calc(var(--portrait-w) * 1.12);
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: stretch;
+  align-content: start;
+  gap: 8px;
+  width: fit-content;
+  padding: 9px 9px 11px;
+  border-radius: 18px;
+}
+
+/* 血条与立绘等宽（同一根左 / 右边缘） */
+.player-panel .vitals {
+  width: var(--portrait-w);
+}
+
+.player-panel .portrait {
+  width: var(--portrait-w);
+  height: var(--portrait-h);
+  border-radius: 16px;
+}
+
+.player-panel .portrait__art {
+  object-position: 50% 18%;
+}
+
+.player-panel .portrait__fallback {
+  font-size: 34px;
+}
+
+.player-panel .hp-bar {
+  height: 12px;
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.08), 0 8px 18px -14px var(--side-color);
+}
+
+/* bugv10 #6：血量数字不再显示 —— 保留在 DOM 里，视觉上裁剪掉 */
+.player-panel .hp-value {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  font-size: 0;
+  line-height: 0;
+}
+
+/* 飘字贴着血条右上角，不再压住立绘的脸 */
+.player-panel .damage-float {
+  top: 24px;
+  right: 14px;
+  font-size: 24px;
+}
+
+/* bugv28 #4：联机倒计时环（贴在立绘右上角） */
+.round-timer {
+  position: absolute;
+  top: 26px;
+  left: calc(9px + var(--portrait-w) - 20px);
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.round-timer__ring {
+  position: absolute;
+  inset: 0;
+  width: 44px;
+  height: 44px;
+  transform: rotate(-90deg);
+}
+
+.round-timer__track {
+  fill: rgba(20, 23, 31, 0.42);
+  stroke: rgba(255, 255, 255, 0.28);
+  stroke-width: 3.5;
+}
+
+.round-timer__prog {
+  fill: none;
+  stroke: var(--side-color);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  transition: stroke 0.2s var(--ease-out);
+}
+
+.round-timer__num {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.round-timer.is-urgent .round-timer__num {
+  color: #ffd7d7;
+}
+
+.round-timer.is-urgent .round-timer__prog {
+  stroke: #ff5a5a;
+}
+
+.portrait {
+  position: relative;
+  width: 64px;
+  height: 72px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  background: linear-gradient(160deg, #ffffff, #e8ecf5);
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.08), 0 8px 18px -12px rgba(20, 23, 31, 0.7),
+    0 0 22px -14px var(--side-color);
+  transition: box-shadow 0.32s var(--ease-out), transform 0.32s var(--ease-out);
+}
+
+.portrait__art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 22%;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.portrait__fallback {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  font-size: 20px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(150deg, var(--side-glow), var(--side-color));
+}
+
+/* 表情差分：用一点点描边 / 光晕变化让状态一眼可见 */
+.player-panel.is-atk .portrait {
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: inset 0 0 0 2px var(--side-color), 0 10px 22px -12px var(--side-color), 0 0 30px -10px var(--side-glow);
+}
+
+.player-panel.is-win .portrait {
+  box-shadow: inset 0 0 0 2px rgba(240, 194, 71, 0.9), 0 0 26px -6px rgba(240, 194, 71, 0.85);
+}
+
+/* bugv11 追加 #1：lose 差分不再叠任何滤镜（之前 saturate(0.45) + brightness(0.92)
+   会在立绘上压出一层灰蒙蒙的蒙版），输赢只靠差分图本身区分 */
+.player-panel.is-lose .portrait {
+  box-shadow: inset 0 0 0 2px rgba(120, 128, 145, 0.55), 0 0 22px -10px rgba(120, 128, 145, 0.6);
+}
+
+.player-panel.is-hit .portrait {
+  animation: portraitHit 0.5s var(--ease-out);
+  box-shadow: inset 0 0 0 2px rgba(214, 40, 60, 0.85), 0 0 26px -8px rgba(214, 40, 60, 0.85);
+}
+
+@keyframes portraitHit {
+  0% {
+    transform: translateX(0) scale(1);
+  }
+  22% {
+    transform: translateX(-4px) scale(1.05);
+  }
+  46% {
+    transform: translateX(3px) scale(1.02);
+  }
+  70% {
+    transform: translateX(-2px) scale(1.01);
+  }
+  100% {
+    transform: translateX(0) scale(1);
+  }
+}
+
+.vitals {
+  /* bugv17 #8：免疫徽章以它为定位基准 */
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.hp-caption {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+/* 护盾：金属质感的银色段落，压在血条最左边（最先被打掉的位置） */
+.hp-bar__shield {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    100deg,
+    #f7f9fc 0%,
+    #c8cfdd 22%,
+    #ffffff 38%,
+    #a9b3c6 56%,
+    #eef2f8 74%,
+    #b6bfd0 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7), 0 0 8px -2px rgba(255, 255, 255, 0.9);
+  transition: width 0.35s var(--ease-out);
+}
+
+/*
+ * 临时护甲（bugv14「精密计算」）：比护盾更靠内侧、颜色偏青蓝，
+ * 一眼能和"永久护盾"区分开（到期未用完会直接消失）。
+ */
+.hp-bar__armor {
+  background: linear-gradient(
+    100deg,
+    #eaf7ff 0%,
+    #9ccdf0 24%,
+    #f2fbff 42%,
+    #6fb3e0 58%,
+    #dcf1ff 76%,
+    #86c4ea 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(220, 245, 255, 0.75), 0 0 8px -2px rgba(140, 205, 245, 0.9);
+}
+
+.shield-value {
+  margin-left: auto;
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #6b7488;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+/* bugv26 #3：状态徽章容器 —— 浮在立绘下沿，**不参与面板高度**
+   （避免"徽章出现 → 面板变高 → 技能槽被顶到"以及随之而来的位置跳动）。 */
+.player-status {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  z-index: 5;
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  pointer-events: none;
+}
+
+/* bugv26 #3：右侧（1 号位）面板镜像 ⇒ 徽章也跟着贴右边，保持对峙感 */
+.player-panel[data-player-panel='1'] .player-status {
+  left: auto;
+  right: 16px;
+  justify-items: end;
+}
+
+.combo-badge {
+  grid-column: 1 / -1;
+  justify-self: start;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: linear-gradient(120deg, var(--side-color), var(--side-glow));
+  box-shadow: 0 6px 14px -8px var(--side-color);
+}
+
+/* bugv25 #2：增伤标识（小一哥 / 深度思考 / 毒鸡蛋），与"连续行动"同排 */
+.power-badge {
+  grid-column: 1 / -1;
+  justify-self: start;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: #4a1b0c;
+  background: linear-gradient(120deg, #ffd9a0, #ff9f5a);
+  box-shadow: 0 6px 14px -8px rgba(216, 92, 40, 0.9);
+}
+
+/* bugv17 #8：免疫状态徽章（挂在血条右侧，呼吸发光） */
+.immune-badge {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: #2b2110;
+  background: linear-gradient(120deg, #ffe9a8, #ffc94d);
+  box-shadow: 0 0 12px -2px rgba(255, 201, 77, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.65);
+  animation: immune-breath 1.5s var(--ease-out) infinite;
+  pointer-events: none;
+  z-index: 4;
+}
+
+@keyframes immune-breath {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.97);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+/* --- 技能槽（画面左右侧中间） --- */
+
+.skill-bar {
+  /* bugv11 追加 #3：技能图标加大 100%（40px → 80px），槽位同步加宽；
+     矮窗口 / 窄屏由文件末尾的媒体查询整体收一档 */
+  --skill-slot-w: 100px;
+  --skill-icon: 80px;
+  /* 槽高 ≈ 图标 + 62px（名称 / 消耗 / 内边距），整条 = 两个槽 + 间距 */
+  --skill-slot-h: calc(var(--skill-icon) + 62px);
+  --skill-bar-h: calc(var(--skill-slot-h) * 2 + 10px);
+  position: absolute;
+  /* 竖直居中，但立绘变大后要往下让 —— 取"居中"与"紧贴立绘下方"里更靠下的那个，
+     这样 900 高度的窗口也不会和立绘重叠，而矮窗口仍然是纯居中。 */
+  top: max(50%, calc(var(--hud-reserve) + 16px + var(--skill-bar-h) / 2));
+  z-index: 6;
+  display: grid;
+  gap: 10px;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.skill-bar.is-side-0 {
+  left: clamp(10px, 1.6vw, 26px);
+}
+
+.skill-bar.is-side-1 {
+  right: clamp(10px, 1.6vw, 26px);
+}
+
+.skill-bar.is-disabled {
+  opacity: 0.5;
+}
+
+/* bugv25 #1：回放里的技能框是**只读展示**（看当时的冷却状态），
+   不能像 `is-disabled` 那样淡到看不见 —— 保持不透明，只去掉可点击的观感。 */
+.skill-bar.is-readonly {
+  opacity: 1;
+}
+
+.skill-bar.is-readonly .skill-slot {
+  cursor: default;
+  filter: saturate(0.78);
+}
+
+.skill-bar.is-readonly .skill-slot:hover {
+  transform: none;
+}
+
+.skill-slot {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  width: var(--skill-slot-w);
+  padding: 8px 6px 7px;
+  border-radius: 16px;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-card);
+  transition: transform 0.22s var(--ease-out), box-shadow 0.22s var(--ease-out), opacity 0.22s var(--ease-out);
+}
+
+.skill-slot__icon {
+  display: grid;
+  place-items: center;
+  width: var(--skill-icon);
+  height: var(--skill-icon);
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+.skill-slot__icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.skill-slot__glyph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-size: calc(var(--skill-icon) * 0.35);
+  font-weight: 600;
+  color: #fff;
+  background: #1d2130;
+}
+
+.skill-slot__name {
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.skill-slot__cost {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--c-ink-faint);
+}
+
+.skill-slot__leaf {
+  width: 7px;
+  height: 7px;
+  border-radius: 60% 0 60% 0;
+  background: #66c08a;
+  box-shadow: 0 0 6px -1px #66c08a;
+}
+
+/* 冷却中：只压暗槽内的内容 —— 气泡（bugv10 #7）必须保持清晰，
+   所以不能在按钮上整体降透明度（子元素无法"提亮"回来）。 */
+.skill-slot.is-cooling {
+  color: var(--c-ink-faint);
+  border-color: rgba(20, 23, 31, 0.06);
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.skill-slot.is-cooling > .skill-slot__icon,
+.skill-slot.is-cooling > .skill-slot__name,
+.skill-slot.is-cooling > .skill-slot__state,
+.skill-slot.is-cooling > .skill-slot__cost,
+.skill-slot.is-cooling > .skill-slot__cd,
+.skill-slot.is-cooling > .skill-slot__pick {
+  opacity: 0.62;
+}
+
+.skill-slot.is-ready {
+  color: var(--c-ink);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card), 0 0 0 1px color-mix(in oklab, var(--c-ink) 18%, transparent),
+    0 12px 26px -16px rgba(20, 23, 31, 0.8);
+}
+
+.skill-slot.is-ready:hover {
+  transform: translateY(-4px) scale(1.04);
+}
+
+.skill-slot.is-picking {
+  border-color: transparent;
+  box-shadow: 0 0 0 2px #1d2130, 0 14px 30px -16px rgba(20, 23, 31, 0.9);
+}
+
+.skill-slot__cd {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: #fff;
+  background: #454b5c;
+  box-shadow: 0 4px 10px -6px rgba(0, 0, 0, 0.9);
+}
+
+.skill-slot__pick {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: #fff;
+  background: #1d2130;
+  box-shadow: 0 0 0 2px #fff;
+}
+
+/* 技能名下方的一行极简状态（bugv10 #7）：冷却中 / 不可用 */
+.skill-slot__state {
+  margin-top: -1px;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--c-ink-faint);
+  white-space: nowrap;
+}
+
+.skill-slot.is-cooling .skill-slot__state {
+  color: #8b93a5;
+}
+
+/* 首次释放免费（bugv11 #6）：金色小标 */
+.skill-slot__state.is-free {
+  color: #a06a08;
+  font-weight: 600;
+}
+
+.skill-bubble__free {
+  font-style: normal;
+  font-weight: 600;
+  color: #a06a08;
+}
+
+/* --- 释放技能后的高亮 + 流光（bugv11 #2） --- */
+
+.skill-slot.is-flash {
+  border-color: transparent;
+  color: var(--c-ink);
+  animation: skillSlotPulse 1.3s var(--ease-out) 2;
+  box-shadow: 0 0 0 2px #ffd479, 0 0 26px -4px rgba(255, 186, 60, 0.9),
+    0 14px 30px -16px rgba(20, 23, 31, 0.9);
+}
+
+.skill-slot.is-flash > .skill-slot__icon,
+.skill-slot.is-flash > .skill-slot__name,
+.skill-slot.is-flash > .skill-slot__state,
+.skill-slot.is-flash > .skill-slot__cost,
+.skill-slot.is-flash > .skill-slot__cd {
+  opacity: 1;
+}
+
+@keyframes skillSlotPulse {
+  0%,
+  100% {
+    transform: translateY(-2px) scale(1);
+  }
+  35% {
+    transform: translateY(-2px) scale(1.09);
+  }
+  70% {
+    transform: translateY(-2px) scale(1.02);
+  }
+}
+
+/* 扫过技能框的一道流光 */
+.skill-slot__flash {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    rgba(255, 236, 176, 0.72) 48%,
+    rgba(255, 255, 255, 0.95) 52%,
+    rgba(255, 236, 176, 0.72) 56%,
+    transparent 74%
+  );
+  background-size: 260% 100%;
+  mix-blend-mode: screen;
+  animation: skillSlotSweep 1.15s var(--ease-out) 2;
+}
+
+@keyframes skillSlotSweep {
+  0% {
+    background-position: 130% 0;
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    background-position: -130% 0;
+    opacity: 0;
+  }
+}
+
+/* 技能框里的内容压在流光之上 */
+.skill-slot > .skill-slot__icon,
+.skill-slot > .skill-slot__name,
+.skill-slot > .skill-slot__state,
+.skill-slot > .skill-slot__cost,
+.skill-slot > .skill-slot__cd,
+.skill-slot > .skill-slot__pick {
+  position: relative;
+  z-index: 2;
+}
+
+.skill-slot > .skill-slot__cd,
+.skill-slot > .skill-slot__pick {
+  position: absolute;
+}
+
+/* 气泡本身仍然贴在技能槽旁边（层叠在流光之上） */
+.skill-slot > .skill-bubble {
+  position: absolute;
+  z-index: 9;
+}
+
+/* --- 技能气泡（bugv10 #7：点技能不再弹窗，改成贴在技能槽旁的泡泡） --- */
+
+.skill-bubble {
+  position: absolute;
+  z-index: 9;
+  display: grid;
+  gap: 6px;
+  /* bugv25 #4：以前只有 `width: max-content` + `max-width` ⇒ 在窄空间里内容被挤变形。
+     现在给出明确的 min-width 让版式稳定，超出时才换行。 */
+  width: max-content;
+  min-width: min(212px, 72vw);
+  max-width: min(238px, 38vw);
+  padding: 11px 13px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(18px) saturate(1.12);
+  box-shadow: var(--shadow-soft);
+  text-align: left;
+  cursor: default;
+  translate: 0 0;
+  scale: 1;
+  transition: opacity 0.2s var(--ease-out), translate 0.24s var(--ease-out), scale 0.24s var(--ease-out);
+}
+
+.skill-bubble.is-side-0 {
+  left: calc(100% + 14px);
+  top: 50%;
+  transform: translateY(-50%);
+  transform-origin: left center;
+}
+
+.skill-bubble.is-side-1 {
+  right: calc(100% + 14px);
+  top: 50%;
+  transform: translateY(-50%);
+  transform-origin: right center;
+}
+
+/* 指向技能槽的小尖角 */
+.skill-bubble__tail {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin-top: -5px;
+  background: inherit;
+  border: 1px solid var(--c-border);
+  transform: rotate(45deg);
+}
+
+.skill-bubble.is-side-0 .skill-bubble__tail {
+  left: -6px;
+  border-top: none;
+  border-right: none;
+  border-radius: 0 0 0 3px;
+}
+
+.skill-bubble.is-side-1 .skill-bubble__tail {
+  right: -6px;
+  border-bottom: none;
+  border-left: none;
+  border-radius: 0 3px 0 0;
+}
+
+.skill-bubble__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-bubble__name {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--c-ink);
+}
+
+.skill-bubble__state {
+  flex-shrink: 0;
+  padding: 1.5px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: #16794f;
+  background: rgba(23, 166, 115, 0.13);
+}
+
+.skill-bubble__state.is-cooling {
+  color: #6b7488;
+  background: rgba(20, 23, 31, 0.07);
+}
+
+.skill-bubble__cost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 11px;
+  color: var(--c-ink-dim);
+}
+
+/* bugv25 #4："场上已有 N 棵"独占一行，避免与消耗文案挤在一起被压变形 */
+.skill-bubble__owned {
+  flex-basis: 100%;
+  font-family: var(--font-num);
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--c-ink-faint);
+}
+
+.skill-bubble__desc {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--c-ink-dim);
+}
+
+.skill-bubble__notice {
+  padding: 6px 9px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #a33a12;
+  background: rgba(216, 92, 40, 0.12);
+  border: 1px solid rgba(216, 92, 40, 0.3);
+}
+
+.skill-bubble.is-warning {
+  border-color: rgba(216, 92, 40, 0.36);
+}
+
+.skill-bubble-enter-active,
+.skill-bubble-leave-active {
+  transition: opacity 0.2s var(--ease-out), translate 0.24s var(--ease-out), scale 0.24s var(--ease-out);
+}
+
+.skill-bubble-enter-from,
+.skill-bubble-leave-to {
+  opacity: 0;
+  scale: 0.95;
+}
+
+/* 泡泡从技能槽那一侧滑出来 */
+.skill-bubble.is-side-0.skill-bubble-enter-from,
+.skill-bubble.is-side-0.skill-bubble-leave-to {
+  translate: -8px 0;
+}
+
+.skill-bubble.is-side-1.skill-bubble-enter-from,
+.skill-bubble.is-side-1.skill-bubble-leave-to {
+  translate: 8px 0;
+}
+
+/* bugv19：挑选魔力植物的操作条 —— 固定在棋盘**下方**的边缘，不压住棋盘格。
+   （棋盘铺满屏幕但相机留了填充率边距，底部这条正好落在留白里。） */
+.skill-dock {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(8px, 1.8vh, 22px);
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(92vw, 1000px);
+  transform: translateX(-50%);
+  animation: menuIn 0.3s var(--ease-out);
+}
+
+.skill-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 15px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--c-ink);
+  background: var(--c-surface-strong);
+  border: 1px solid var(--c-border);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-soft);
+}
+
+/* 棋盘下方的确认按钮（bugv19） */
+.skill-confirm {
+  flex: 0 0 auto;
+  padding: 11px 22px;
+  border-radius: 999px;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fff;
+  white-space: nowrap;
+  background: linear-gradient(120deg, var(--side-color, #2f6bff), #16233f);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 14px 30px -14px var(--side-color, #2f6bff);
+  transition: transform 0.16s var(--ease-out), box-shadow 0.16s var(--ease-out), opacity 0.16s;
+}
+
+.skill-confirm:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 34px -14px var(--side-color, #2f6bff);
+}
+
+.skill-confirm:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.skill-confirm:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: saturate(0.6);
+}
+
+.skill-hint__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--side-color);
+  box-shadow: 0 0 10px var(--side-color);
+}
+
+/* --- 角色选择 --- */
+
+.character-picker {
+  --card-art-h: clamp(104px, 16vh, 152px);
+  --card-extra-h: 66px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 两侧的小标签：切换正在编辑哪一方 + 紧凑显示双方当前的 pick（bugv10 #8） */
+.character-picker__tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: rgba(20, 23, 31, 0.04);
+}
+
+.picker-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--c-ink-dim);
+  transition: color 0.2s var(--ease-out), background 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+}
+
+.picker-tab:hover {
+  color: var(--c-ink);
+}
+
+.picker-tab.is-active {
+  color: #fff;
+  background: linear-gradient(130deg, #1d2130, #333a4d);
+  box-shadow: 0 10px 22px -16px rgba(20, 23, 31, 0.9);
+}
+
+.picker-tab__label {
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
+.picker-tab__pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.picker-tab__art {
+  width: 20px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  object-fit: cover;
+  object-position: 50% 18%;
+  background: linear-gradient(160deg, #fff, var(--char-glow, #dfe4ef));
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.08);
+  -webkit-user-drag: none;
+}
+
+.picker-tab__art--random {
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(150deg, #6f7b95, #2b3040);
+}
+
+.picker-tab__name {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-tab__tag {
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  color: #7a4a12;
+  background: rgba(226, 160, 40, 0.2);
+}
+
+.picker-tab.is-active .picker-tab__tag {
+  color: #ffd894;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* --- 横向轮播（bugv10 #8：一行两张卡，左右箭头翻页、到头绕回） --- */
+
+.character-carousel {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.carousel-arrow {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: calc(var(--card-art-h) * 0.72);
+  min-height: 56px;
+  border-radius: 12px;
+  color: var(--c-ink-dim);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.62);
+  transition: color 0.2s var(--ease-out), background 0.2s var(--ease-out), transform 0.2s var(--ease-out),
+    border-color 0.2s var(--ease-out);
+}
+
+.carousel-arrow:hover {
+  color: var(--c-ink);
+  background: #fff;
+  border-color: var(--c-border-strong);
+  transform: translateY(-1px);
+}
+
+.carousel-arrow svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 翻页时新旧两页是"先出后进"，这里撑住高度，避免菜单跟着跳动 */
+.character-carousel__viewport {
+  min-width: 0;
+  min-height: calc(var(--card-art-h) + var(--card-extra-h));
+}
+
+.character-picker__cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.character-carousel__dots {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.carousel-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(20, 23, 31, 0.16);
+  transition: width 0.22s var(--ease-out), background 0.22s var(--ease-out);
+}
+
+.carousel-dot:hover {
+  background: rgba(20, 23, 31, 0.34);
+}
+
+.carousel-dot.is-active {
+  width: 18px;
+  background: var(--c-ink);
+}
+
+/* 翻页时新一页从对应方向滑进来（旧的立刻移除，DOM 里始终只有当前页） */
+.character-carousel__page {
+  --slide-x: 10px;
+  animation: carouselIn 0.24s var(--ease-out) both;
+}
+
+@keyframes carouselIn {
+  from {
+    opacity: 0;
+    transform: translateX(var(--slide-x, 10px));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 卡片：只显示立绘 + 名称（bugv10 #8），立绘比旧版更大 */
+.character-card {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 8px 10px;
+  text-align: center;
+  border-radius: 16px;
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+  transition: transform 0.2s var(--ease-out), border-color 0.2s var(--ease-out), background 0.2s var(--ease-out),
+    box-shadow 0.2s var(--ease-out);
+}
+
+/* 角色特征色的顶部光晕 */
+.character-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.75;
+  background: radial-gradient(80% 55% at 50% 0%, color-mix(in oklab, var(--char-glow) 55%, transparent), transparent 72%);
+}
+
+.character-card:hover {
+  transform: translateY(-2px);
+  background: #fff;
+}
+
+.character-card.is-active {
+  border-color: transparent;
+  background: #fff;
+  box-shadow: 0 0 0 2px var(--char-color), 0 18px 30px -20px var(--char-color);
+}
+
+.character-card__art {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: var(--card-art-h);
+  border-radius: 12px;
+  object-fit: cover;
+  object-position: 50% 16%;
+  background: linear-gradient(160deg, #ffffff, var(--char-glow));
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.08), 0 12px 24px -18px var(--char-color);
+  -webkit-user-drag: none;
+}
+
+.character-card__art--glyph {
+  display: grid;
+  place-items: center;
+  font-size: calc(var(--card-art-h) * 0.42);
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(150deg, #6f7b95, #2b3040);
+}
+
+/* 「随机」卡（bugv10 #8） */
+.character-card.is-random,
+.character-card--random {
+  --char-color: #6d7688;
+  --char-glow: #d7dceb;
+}
+
+.character-card__name {
+  position: relative;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.character-card__hint {
+  position: relative;
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: var(--c-ink-faint);
+}
+
+/* 设置面板里的紧凑轮播（同样支持箭头翻页与随机卡） */
+.character-picker.is-compact {
+  --card-art-h: 84px;
+  --card-extra-h: 53px;
+}
+
+.character-picker.is-compact .character-card {
+  padding: 6px;
+  gap: 5px;
+}
+
+.character-picker.is-compact .character-card__name {
+  font-size: 12px;
+}
+
+.character-picker.is-compact .carousel-arrow {
+  height: 62px;
+  min-height: 62px;
+}
+
+/* ==========================================================================
+   开始菜单（bugv10 #8：左右两栏，高度不再紧张）
+   ========================================================================== */
+
+.start-menu__inner {
+  width: min(960px, 94vw);
+  max-height: min(90vh, 764px);
+  overflow-y: auto;
+  grid-template-columns: minmax(0, 1fr) minmax(286px, 340px);
+  align-items: start;
+  gap: 20px;
+  padding: 22px 24px 20px;
+  scrollbar-width: thin;
+}
+
+.start-menu__left {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 三个操作按钮在左栏里收紧一点，菜单整体不再超高 */
+.start-menu__actions .menu-btn {
+  padding: 11px 16px;
+}
+
+.start-menu__hint {
+  margin: 0;
+  text-align: left;
+}
+
+/* 右栏：当前选中角色的技能详情 */
+/*
+ * 角色技能详情卡的**外观**挂在组件自己的类上（bugv34k）：
+ * 这样单机开始菜单与联机房间两个使用处长得完全一样 ——
+ * 以前这份样式只挂在 `.start-menu__detail` 上，房间那份拿不到卡片背景 / 边框。
+ * `.start-menu__detail` 现在只剩"在开始菜单栅格里的排序"作用（见下面的媒体查询）。
+ */
+.character-detail {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding: 15px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.62);
+  animation: paneIn 0.28s var(--ease-out);
+}
+
+.detail-char {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.detail-char__art {
+  width: 62px;
+  height: 72px;
+  flex-shrink: 0;
+  border-radius: 13px;
+  object-fit: cover;
+  object-position: 50% 16%;
+  background: linear-gradient(160deg, #ffffff, var(--char-glow));
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.08), 0 10px 22px -16px var(--char-color);
+  -webkit-user-drag: none;
+}
+
+.detail-char__art--empty {
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.detail-char__meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-char__eyebrow {
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  color: var(--c-ink-faint);
+}
+
+.detail-char__name {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.detail-char__tagline {
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+.detail-roll {
+  margin: 0;
+  padding: 8px 11px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #7a4a12;
+  background: rgba(226, 160, 40, 0.14);
+  border: 1px solid rgba(226, 160, 40, 0.3);
+}
+
+.detail-skills {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detail-skill {
+  display: grid;
+  gap: 5px;
+  padding: 10px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.detail-skill__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 程序化生成的技能图标（bugv10 追加 #2：换回 canvas 生成的那套 PNG）
+   bugv11 追加 #3：和局内技能槽一起加大 100%（28px → 56px） */
+.detail-skill__icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.detail-skill__icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  filter: drop-shadow(0 6px 12px rgba(20, 23, 31, 0.22));
+}
+
+.detail-skill__glyph {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 14px;
+  font-size: 22px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(140deg, var(--char-color), var(--char-glow));
+  box-shadow: 0 6px 14px -10px var(--char-color);
+}
+
+.detail-skill__name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.detail-skill__meta {
+  margin-left: auto;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--c-ink-faint);
+  white-space: nowrap;
+}
+
+.detail-skill__desc {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--c-ink-dim);
+}
+
+.detail-tip {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--c-ink-faint);
+}
+
+/* 窄屏（< 1000px）：拆回单栏，详情面板落到轮播下方（bugv10 #8） */
+@media (max-width: 1000px) {
+  .start-menu__inner {
+    width: min(560px, 94vw);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  /*
+   * ⚠️ 下面这一串 `order` 是给**主菜单**排版的（`.start-menu__left` 拆成 contents 后，
+   * 其子元素变成面板的直接栅格项，需要重排让详情卡落在轮播下方）。
+   * 必须限定到 `.start-menu__inner--solo`：房间 / 匹配大厅 / 登录面板也是单栏面板，
+   * 若继承 `order`，标题（`.start-menu__brand`）会被推到面板**最底部**——就是
+   * "手机竖屏下房间标题跑到页面最下方"这个 bug（bugv34l）。
+   */
+  .start-menu__inner--solo .start-menu__left {
+    display: contents;
+  }
+
+  .start-menu__inner--solo .start-menu__brand {
+    order: 1;
+  }
+
+  .start-menu__inner--solo .start-menu__modes {
+    order: 2;
+  }
+
+  .start-menu__inner--solo .start-menu__hint {
+    order: 3;
+  }
+
+  .start-menu__inner--solo .character-picker {
+    order: 4;
+  }
+
+  .start-menu__inner--solo .start-menu__detail {
+    order: 5;
+  }
+
+  .start-menu__inner--solo .start-menu__actions {
+    order: 6;
+  }
+
+  .start-menu__inner--solo .start-menu__footer {
+    order: 7;
+  }
+}
+
+/* bugv11 追加 #3：立绘比原来大 25%，所以矮窗口要收得更早一档 ——
+   同时把技能槽收一档，保证立绘下沿与技能栏之间始终留着空隙
+   （技能栏的 top 会用 --hud-reserve 自动避让）。 */
+@media (max-height: 880px) {
+  .app-root {
+    --hud-portrait-w: clamp(134px, min(23vh, 24vw), 214px);
+  }
+}
+
+@media (max-height: 800px) {
+  .skill-bar {
+    --skill-slot-w: 86px;
+    --skill-icon: 64px;
+  }
+}
+
+/* 矮窗口：立绘与角色卡整体再收一档，别盖住棋盘 / 按钮 */
+@media (max-height: 720px) {
+  .app-root {
+    --hud-portrait-w: clamp(112px, min(20vh, 21vw), 186px);
+  }
+
+  .skill-bar {
+    --skill-slot-w: 82px;
+    --skill-icon: 60px;
+  }
+
+  .character-picker {
+    --card-art-h: clamp(92px, 14vh, 132px);
+  }
+}
+
+/* 窄屏：立绘再收一档，菜单留白收紧 */
+@media (max-width: 900px) {
+  .app-root {
+    --hud-portrait-w: clamp(110px, min(20vh, 26vw), 176px);
+  }
+
+  .skill-bar {
+    --skill-slot-w: 84px;
+    --skill-icon: 62px;
+  }
+
+  .player-panel .portrait__fallback {
+    font-size: 26px;
+  }
+
+  .start-menu__inner {
+    padding: 20px 18px 18px;
+    gap: 14px;
+  }
+
+  .character-picker {
+    --card-art-h: clamp(92px, 15vh, 128px);
+  }
+}
+
+@media (max-width: 460px) {
+  .character-carousel {
+    grid-template-columns: 28px minmax(0, 1fr) 28px;
+    gap: 6px;
+  }
+
+  .carousel-arrow {
+    width: 28px;
+  }
+
+  .character-picker__cards {
+    gap: 7px;
+  }
+}
+
+/* ==========================================================================
+   bugv25 #5：手机竖屏布局
+   --------------------------------------------------------------------------
+   目标（只在 ≤720px 生效，桌面端一行都不受影响）：
+   1. 技能改成**立绘下方两个无图标小按钮**，点击弹底部抽屉（详情 + 使用）；
+   2. 结算面板从绝对定位改为**正常文档流**，跟在棋盘下方；
+   3. 开始菜单单栏居中，消掉横向滚动条。
+   ========================================================================== */
+@media (max-width: 720px) {
+  /* 纵向流：立绘行 → 技能小按钮 → 棋盘 → 结算面板 → 回放面板 */
+  .app-root {
+    display: flex;
+    flex-direction: column;
+    /* 用动态视口高度，避免手机浏览器地址栏导致的 100vh 误差 */
+    height: 100dvh;
+    min-height: 0;
+    /* bugv25 #5：结算 / 回放面板都进了文档流 ⇒ 允许纵向滚动，避免互相压住 */
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  /* 顶部立绘行：从绝对定位改为文档流的第一行 */
+  .hud {
+    position: static;
+    order: 1;
+    padding: 8px 10px 0;
+    gap: 8px;
+  }
+
+  .hud > * {
+    width: auto;
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .app-root {
+    --hud-portrait-w: clamp(88px, 22vw, 132px);
+    --hud-reserve: var(--hud-portrait-w);
+  }
+
+  /* 技能小按钮：紧跟在立绘下方，一行两组的"左二 / 右二" */
+  .mobile-skills {
+    order: 2;
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 10px 0;
+  }
+
+  .mobile-skills__group {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    gap: 6px;
+  }
+
+  /* 棋盘占满剩余空间 */
+  .board-layer.board-stage {
+    position: relative;
+    inset: auto;
+    order: 3;
+    flex: 1 1 auto;
+    min-height: 42vh;
+    width: 100%;
+    height: auto;
+  }
+
+  /* 结算面板：正常文档流，跟在棋盘下方 */
+  .attack-card {
+    position: static;
+    order: 4;
+    /* ⚠️ 必须 `flex: none`：默认 `flex-shrink: 1` 会在纵向空间紧张时把它压成几十像素
+       （面板内部有 overflow-y: auto ⇒ 表现成"内容被截断"，而不是撑高页面）。 */
+    flex: none;
+    width: auto;
+    margin: 0 10px 10px;
+    max-height: 42vh;
+    overflow-y: auto;
+  }
+
+  /* 选植物的确认条：贴底、去掉长提示后收窄 */
+  .skill-dock {
+    position: fixed;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    max-width: none;
+    transform: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .skill-dock .skill-hint {
+    justify-content: center;
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+
+  .skill-dock .skill-confirm {
+    width: 100%;
+  }
+
+  /* 右下角播放器 / 设置按钮：上移，别压住底部确认条 */
+  .side-dock {
+    bottom: 74px;
+  }
+
+  /* 正在选植物：底部确认条会占满整行 ⇒ 把侧边按钮整组藏起来，避免压住"确认选择" */
+  .app-root.is-plant-selecting .side-dock {
+    display: none;
+  }
+
+  /* bugv26 #2：底部确认条（fixed 贴底）正好压在状态条上（状态条在棋盘底部 absolute）⇒
+     选植物时把状态条藏掉 —— 它这时显示的是"XX 落子"，已经没意义了。
+     不做这一步的话"取消 / 确认选择"两个按钮会跟状态文字重叠。 */
+  .app-root.is-plant-selecting .status-strip {
+    display: none;
+  }
+
+  /* bugv26 #2：只允许单指纵向滚动（页面可滚），双指手势留给 JS 做棋盘缩放。
+     不写 `touch-action: none` 是因为那样连页面都滚不动了。 */
+  .board-canvas {
+    touch-action: pan-y;
+  }
+
+  /* 开始菜单：单栏 + 居中（两栏在手机上会溢出，产生横向滚动条）
+     ⚠️ 单栏与各分节的 `order` 已由上面的 `@media (max-width: 1000px)` 处理
+     （那里用的是 `.start-menu__left { display: contents }` + 逐项 order），
+     这里**只**补宽度 / 留白 / 兜住横向溢出，不要再写 order —— 会打乱既有排序。 */
+  .start-menu {
+    padding: 10px;
+    overflow-x: hidden;
+  }
+
+  .start-menu__inner {
+    width: min(420px, 100%);
+    max-width: 100%;
+    max-height: calc(100dvh - 20px);
+    padding: 16px 14px 14px;
+    gap: 12px;
+    overflow-x: hidden;
+    box-sizing: border-box;
+  }
+
+  .start-menu__brand h1 {
+    font-size: 24px;
+  }
+
+  .replay-panel {
+    /* bugv25 #5：手机端回放面板也走**文档流**（排在结算面板之后）。
+       以前它是 `position: absolute` 贴底，会把结算面板整个盖住。 */
+    position: static;
+    order: 5;
+    /* 同 `.attack-card`：别被 flex 压扁（内部有 overflow-y: auto，会被误读成"内容缺失"） */
+    flex: none;
+    right: auto;
+    left: auto;
+    bottom: auto;
+    width: auto;
+    margin: 0 10px 10px;
+    max-height: none;
+  }
+}
+
+/* 移动端技能小按钮（无图标，按需求只显示名称与消耗 / 冷却） */
+.mobile-skill-btn {
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 7px 6px;
+  border-radius: 12px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink-dim);
+  transition: transform 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+}
+
+.mobile-skill-btn:active {
+  transform: scale(0.97);
+}
+
+.mobile-skill-btn__name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.mobile-skill-btn__meta {
+  font-size: 10px;
+  color: var(--c-ink-faint);
+  white-space: nowrap;
+}
+
+.mobile-skill-btn.is-ready {
+  border-color: var(--side-color);
+  color: var(--c-ink);
+  box-shadow: 0 4px 12px -8px var(--side-color);
+}
+
+.mobile-skill-btn.is-cooling {
+  opacity: 0.55;
+}
+
+.mobile-skill-btn:disabled {
+  opacity: 0.45;
+}
+
+/* 移动端技能抽屉（底部弹出） */
+.skill-drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 14;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.skill-drawer__mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 12, 18, 0.42);
+}
+
+.skill-drawer__sheet {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 10px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  border-radius: 18px 18px 0 0;
+  border-top: 1px solid var(--c-border);
+  background: var(--c-surface-strong);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 -14px 40px -20px rgba(10, 12, 18, 0.55);
+}
+
+.skill-drawer__handle {
+  justify-self: center;
+  width: 38px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--c-border-strong);
+}
+
+.skill-drawer__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* bugv26 #2：技能图标（与桌面技能槽同源的程序化图标） */
+.skill-drawer__icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+}
+
+.skill-drawer__icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.skill-drawer__icon.is-cooling {
+  opacity: 0.45;
+  filter: grayscale(0.5);
+}
+
+.skill-drawer__char {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--c-ink-faint);
+  width: 100%;
+}
+
+.skill-drawer__name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--c-ink);
+}
+
+.skill-drawer__state {
+  padding: 1.5px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: #16794f;
+  background: rgba(23, 166, 115, 0.13);
+  margin-left: auto;
+}
+
+.skill-drawer__state.is-cooling {
+  color: #6b7488;
+  background: rgba(20, 23, 31, 0.07);
+}
+
+.skill-drawer__cost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--c-ink-dim);
+}
+
+.skill-drawer__cost b {
+  color: var(--c-ink);
+}
+
+.skill-drawer__cost em {
+  flex-basis: 100%;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+.skill-drawer__desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--c-ink-dim);
+}
+
+.skill-drawer__actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.skill-drawer-enter-active,
+.skill-drawer-leave-active {
+  transition: opacity 0.22s var(--ease-out);
+}
+
+.skill-drawer-enter-active .skill-drawer__sheet,
+.skill-drawer-leave-active .skill-drawer__sheet {
+  transition: transform 0.26s var(--ease-out);
+}
+
+.skill-drawer-enter-from,
+.skill-drawer-leave-to {
+  opacity: 0;
+}
+
+.skill-drawer-enter-from .skill-drawer__sheet,
+.skill-drawer-leave-to .skill-drawer__sheet {
+  transform: translateY(100%);
+}
+
+
+/* ==========================================================================
+   bugv29 #4：技能演出
+   —— 全屏火红（gtp 恶龙吐息）/ 高速速度线（deepseek 杀鲸霸拳）/
+      立绘镜面反光（任意角色获得护盾）
+   bugv30 #4：恶龙吐息的全屏演出由"椭圆火焰遮罩"改成**环绕屏幕一圈的火舌**
+   ========================================================================== */
+
+/* --- 全屏演出层（统一：铺满、不挡点击） --- */
+.screen-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* --- 火球：全屏火红演出（bugv29 #4）。bugv32 起去掉环绕屏幕的火舌，只留一圈火红渐晕。 --- */
+.screen-fx--fire {
+  background: radial-gradient(
+    120% 100% at 50% 50%,
+    rgba(255, 96, 24, 0.06) 30%,
+    rgba(255, 78, 12, 0.3) 62%,
+    rgba(150, 24, 0, 0.52) 100%
+  );
+  animation: fireScreenFade 3.4s var(--ease-out) forwards;
+}
+
+@keyframes fireScreenFade {
+  0% {
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* --- 速度线：细长竖线由下往上高速掠过 --- */
+.screen-fx--speed {
+  opacity: 0.75;
+}
+
+.speed-line {
+  position: absolute;
+  bottom: -46%;
+  width: 2px;
+  height: 46%;
+  border-radius: 999px;
+  background: linear-gradient(to top, rgba(255, 255, 255, 0), var(--fx-color, #8fb3ff));
+  animation-name: speedLineUp;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform, opacity;
+}
+
+@keyframes speedLineUp {
+  0% {
+    transform: translateY(0) scaleY(0.7);
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translateY(-300%) scaleY(1.3);
+    opacity: 0;
+  }
+}
+
+/* --- 立绘镜面反光（护盾到手，2 秒内扫两遍） --- */
+.portrait__gloss {
+  position: absolute;
+  inset: -30% -70%;
+  pointer-events: none;
+  background: linear-gradient(
+    102deg,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 255, 255, 0.16) 46%,
+    rgba(255, 255, 255, 0.94) 50%,
+    rgba(255, 255, 255, 0.16) 54%,
+    rgba(255, 255, 255, 0) 60%
+  );
+  mix-blend-mode: screen;
+  animation: portraitGloss 1s var(--ease-out) 2 both;
+}
+
+@keyframes portraitGloss {
+  from {
+    transform: translateX(-62%);
+  }
+  to {
+    transform: translateX(62%);
+  }
+}
+
+/* --- 立绘「镜面破碎」（bugv31：护盾 / 临时护甲被一击打碎） ---
+   8 片碎片 = **同一张立绘** + 8 个三角形 `clip-path`（矩形被两条对角线 + 两条中线切开，
+   8 个三角形刚好铺满立绘，所以碎片拼起来与立绘像素级对齐），
+   从中心向外飞散、旋转、淡出；再叠一记瞬时白光。
+   碎片会被 `.portrait` 的 `overflow: hidden` 裁掉 —— 正好是"玻璃飞出画框"的观感。 */
+.portrait__shatter {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.portrait__shard {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  animation: portraitShatter 0.78s cubic-bezier(0.22, 0.9, 0.3, 1) var(--delay, 0s) both;
+  will-change: transform, opacity;
+}
+
+/* 中心点取 46% / 42%：立绘的视觉重心在上方（`object-position: 50% 22%`），
+   裂纹从"脸"的位置炸开，而不是从画面正中。 */
+.portrait__shard.is-0 { clip-path: polygon(0 0, 50% 0, 46% 42%); }
+.portrait__shard.is-1 { clip-path: polygon(50% 0, 100% 0, 46% 42%); }
+.portrait__shard.is-2 { clip-path: polygon(100% 0, 100% 50%, 46% 42%); }
+.portrait__shard.is-3 { clip-path: polygon(100% 50%, 100% 100%, 46% 42%); }
+.portrait__shard.is-4 { clip-path: polygon(100% 100%, 50% 100%, 46% 42%); }
+.portrait__shard.is-5 { clip-path: polygon(50% 100%, 0 100%, 46% 42%); }
+.portrait__shard.is-6 { clip-path: polygon(0 100%, 0 50%, 46% 42%); }
+.portrait__shard.is-7 { clip-path: polygon(0 50%, 0 0, 46% 42%); }
+
+.portrait__shatter-flash {
+  position: absolute;
+  inset: -20%;
+  background: radial-gradient(
+    circle at 46% 42%,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(216, 238, 255, 0.55) 34%,
+    rgba(160, 214, 255, 0) 68%
+  );
+  mix-blend-mode: screen;
+  animation: portraitShatterFlash 0.42s var(--ease-out) both;
+}
+
+@keyframes portraitShatter {
+  0% {
+    transform: translate(0, 0) rotate(0deg) scale(1);
+    opacity: 1;
+    filter: brightness(2) saturate(0.5);
+  }
+  24% {
+    filter: brightness(1.45) saturate(0.85);
+  }
+  100% {
+    transform: translate(var(--dx, 0), var(--dy, 0)) rotate(var(--rot, 0deg)) scale(0.86);
+    opacity: 0;
+    filter: brightness(1) saturate(1);
+  }
+}
+
+@keyframes portraitShatterFlash {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.4);
+  }
+}
+
+/* ==========================================================================
+   bugv34e：联机房间（大厅）+ 房间聊天 + 房间设置
+   ========================================================================== */
+
+/* --- 房间大厅 ------------------------------------------------------------- */
+
+.start-menu__inner.room-view {
+  /* 比原先宽一些：右侧要放下"角色技能详情"（与单机同款），
+     760px 时说明文案会被挤得换行太多、反而更高。 */
+  width: min(880px, 94vw);
+  /* ⚠️ 必须显式单列：`.start-menu__inner` 是主菜单的**两栏**网格
+     （左按钮 + 右角色详情），窄屏媒体查询会把它压成单列 —— 于是
+     "手机上正常、电脑上被挤成两列"。所有单栏面板都要在这里复写列定义。 */
+  grid-template-columns: minmax(0, 1fr);
+  /* 房间内容比主菜单高（角色轮播 + 成员卡），放宽高度上限并收紧间距，
+     让底部的「准备 / 房间设置 / 退出」在常见笔记本视口里也直接可见。 */
+  max-height: min(94vh, 880px);
+  gap: 14px;
+  padding: 20px 22px 18px;
+}
+
+.room-view__code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--c-surface-strong);
+  border: 1px solid var(--c-border);
+}
+
+.room-view__code-label {
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--c-ink-dim);
+}
+
+.room-view__code-chars {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.room-view__code-chars b {
+  display: grid;
+  place-items: center;
+  min-width: 26px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(20, 23, 31, 0.06);
+  font-family: var(--font-num);
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  color: var(--c-ink);
+}
+
+.room-view__code-tip {
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+/* bugv34i：成员改成**上下排版**（原来是左右两栏），并让"已准备"一眼可见。 */
+.room-members {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.room-member {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 84px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--c-surface-strong);
+  border: 1px solid var(--c-border);
+  position: relative;
+}
+
+.room-member.is-ready {
+  border-color: rgba(46, 160, 92, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(46, 160, 92, 0.18);
+}
+
+.room-member__badge.is-ready {
+  color: #1c6b3c;
+  background: rgba(46, 160, 92, 0.16);
+}
+
+.room-member.is-me {
+  border-color: var(--c-border-strong);
+}
+
+.room-member.is-offline {
+  opacity: 0.62;
+}
+
+.room-member__art {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  flex: none;
+}
+
+.room-member__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.room-member__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  color: var(--c-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-member__badge {
+  flex: none;
+  padding: 1px 7px;
+  font-size: 10px;
+  border-radius: 999px;
+  color: var(--c-ink-dim);
+  background: rgba(20, 23, 31, 0.07);
+}
+
+.room-member__badge.is-host {
+  color: #8a5a00;
+  background: rgba(234, 179, 8, 0.18);
+}
+
+.room-member__badge.is-offline {
+  color: #a3372a;
+  background: rgba(216, 92, 40, 0.16);
+}
+
+.room-member__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+}
+
+.room-member__wins {
+  font-family: var(--font-num);
+  color: var(--c-ink);
+}
+
+.room-member__transfer {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  font-size: 11px;
+}
+
+.room-member__empty {
+  width: 100%;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--c-ink-faint);
+}
+
+.room-member__empty-tip {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.room-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-field__label {
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--c-ink-dim);
+}
+
+.room-deck {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--c-surface-strong);
+  border: 1px solid var(--c-border);
+}
+
+.room-deck__current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.room-deck__art {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+}
+
+.room-deck__name {
+  font-size: 14px;
+  color: var(--c-ink);
+}
+
+.room-deck__hint {
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+.room-deck__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 8px;
+}
+
+.room-deck__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+}
+
+.room-deck__item img {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+}
+
+.room-deck__item.is-active {
+  border-color: var(--c-border-strong);
+  color: var(--c-ink);
+  background: var(--c-surface-strong);
+}
+
+.room-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  border: 1px dashed var(--c-border-strong);
+  font-size: 12.5px;
+  color: var(--c-ink-dim);
+}
+
+/* --- 房间聊天（左侧可收起） ----------------------------------------------- */
+
+.room-chat {
+  position: fixed;
+  left: 0;
+  top: 96px;
+  bottom: 96px;
+  z-index: 8;
+  display: flex;
+  align-items: stretch;
+  pointer-events: none;
+}
+
+.room-chat > * {
+  pointer-events: auto;
+}
+
+.room-chat__flap {
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 6px;
+  border: 1px solid var(--c-border);
+  border-left: none;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--c-surface-strong);
+  color: var(--c-ink-dim);
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+}
+
+.room-chat__flap-text {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.22em;
+  font-size: 11.5px;
+}
+
+.room-chat__flap-badge {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: #fff;
+  background: #d85c28;
+}
+
+.room-chat__panel {
+  display: flex;
+  flex-direction: column;
+  width: min(272px, 76vw);
+  border: 1px solid var(--c-border);
+  border-left: none;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--c-surface-strong);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.room-chat__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--c-border);
+  font-size: 12.5px;
+  color: var(--c-ink);
+}
+
+.room-chat__head-tip {
+  flex: 1;
+  font-size: 10.5px;
+  color: var(--c-ink-faint);
+}
+
+.room-chat__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-chat__empty {
+  font-size: 11.5px;
+  color: var(--c-ink-faint);
+  text-align: center;
+  padding-top: 12px;
+}
+
+.room-chat__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.room-chat__item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--c-ink-faint);
+}
+
+.room-chat__item-name {
+  color: var(--c-ink-dim);
+}
+
+.room-chat__item-text {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 5px 9px;
+  border-radius: 10px;
+  background: rgba(20, 23, 31, 0.06);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--c-ink);
+  word-break: break-word;
+}
+
+.room-chat__item.is-mine .room-chat__item-text {
+  align-self: flex-end;
+  background: rgba(38, 108, 178, 0.14);
+}
+
+.room-chat__input {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--c-border);
+}
+
+.room-chat__input input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border-strong);
+  background: #fff;
+  font-size: 12px;
+  color: var(--c-ink);
+  outline: none;
+}
+
+.room-chat__input input:focus {
+  border-color: rgba(38, 108, 178, 0.6);
+}
+
+/* --- 房间设置弹层 --------------------------------------------------------- */
+
+.room-settings {
+  position: relative;
+  width: min(680px, 94vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background: var(--c-surface-strong);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.room-settings__head {
+  position: relative;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.room-settings__head h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: var(--c-ink);
+}
+
+.room-settings__head p {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+}
+
+.room-settings__head .icon-btn {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+}
+
+.room-settings__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.room-settings__section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--c-ink);
+}
+
+.room-settings__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.room-settings__label {
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+  min-width: 92px;
+}
+
+.room-settings__group {
+  margin-top: 8px;
+}
+
+.room-settings__group-title {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--c-ink-faint);
+  margin-bottom: 6px;
+}
+
+.room-settings__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 8px;
+}
+
+.room-settings__field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+}
+
+.room-settings__field input {
+  width: 78px;
+  padding: 5px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border-strong);
+  background: #fff;
+  font-family: var(--font-num);
+  font-size: 12px;
+  color: var(--c-ink);
+  outline: none;
+  text-align: right;
+}
+
+.room-settings__field input:disabled {
+  background: rgba(20, 23, 31, 0.05);
+  color: var(--c-ink-faint);
+}
+
+.room-settings__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--c-border);
+}
+
+/* ==========================================================================
+   bugv34i：联机登录面板 + 房间底部三按钮
+   ========================================================================== */
+
+.start-menu__inner.auth-panel {
+  width: min(468px, 94vw);
+  /* 同 `.room-view`：单栏面板必须复写列定义，否则宽屏下会被主菜单的两栏网格劈开。 */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.auth-panel__hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-ink-dim);
+}
+
+.auth-panel__tabs {
+  align-self: stretch;
+}
+
+.auth-panel__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-field__label {
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--c-ink-dim);
+}
+
+.auth-field__input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border-strong);
+  background: #fff;
+  font-size: 13px;
+  color: var(--c-ink);
+  outline: none;
+}
+
+.auth-field__input:focus {
+  border-color: rgba(38, 108, 178, 0.6);
+}
+
+.auth-panel__submit {
+  margin-top: 2px;
+}
+
+.auth-panel__account-note {
+  font-size: 11px;
+  color: var(--c-ink-faint);
+}
+
+/* --- 房间底部三按钮（准备 / 房间设置 / 退出）并排 --------------------------- */
+
+/* bugv34m：底部去掉描述文案 —— 「准备」独占一行，房间设置 / 退出房间并排一行。 */
+.room-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.room-actions__btn {
+  min-width: 0;
+}
+
+/* 通栏按钮（准备）：跨满两列 */
+.room-actions__btn--wide {
+  grid-column: 1 / -1;
+}
+
+.room-actions__btn .menu-btn__label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-actions__btn.is-danger .menu-btn__label {
+  color: #b4471f;
+}
+
+.room-actions__btn.is-danger:not(:disabled):hover {
+  border-color: rgba(216, 92, 40, 0.5);
+  background: rgba(216, 92, 40, 0.08);
+}
+
+.online-lobby__account {
+  font-size: 11.5px;
+  color: var(--c-ink-dim);
+}
+
+/* ==========================================================================
+   bugv34k：房间内"我的角色"= 左轮播 + 右技能详情（与单机开始菜单同款）
+   ========================================================================== */
+
+.room-deck-layout {
+  display: grid;
+  /* 宽屏（bugv34l）：**左栏 = 角色选择器 + 底部三按钮**，**右栏 = 技能详情**。
+     以前是"选择器左 / 技能详情右"、按钮在最下方通栏 —— 轮播矮、技能详情高，
+     两者高度差会在选择器下方留一大块空白；改成现在这样按钮把左列撑满，空白消失。 */
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 344px);
+  /* ⚠️ 必须是 start（不是 stretch）：技能详情卡比"选择器 + 按钮"高。
+     若让左列撑到与右列同高，按钮会被顶到面板底部、掉出可视区（面板本身有
+     max-height + overflow-y），用户还得滚动才能点到「准备」。 */
+  align-items: start;
+  gap: 16px;
+}
+
+/* 左栏：角色选择器在上、底部三按钮紧随其下 */
+.room-deck-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.room-deck-detail {
+  /* 房间面板里技能详情不参与主菜单栅格，自己成一块 */
+  min-width: 0;
+}
+
+@media (max-width: 1000px) {
+  .room-deck-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* --- 登录面板：输入框加高 + 底部两按钮并排（bugv34k） --------------------- */
+
+.auth-field__input {
+  padding: 13px 14px;
+  font-size: 14px;
+}
+
+.auth-panel__actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.auth-panel__actions .menu-btn__label,
+.auth-panel__actions .menu-btn__meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 昵称是"账号不存在时"才追加的一栏，做个入场提示 */
+.auth-field--extra .auth-field__label {
+  color: #b4471f;
+}

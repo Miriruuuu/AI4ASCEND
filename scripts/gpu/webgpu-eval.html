@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>四子棋 · WebGPU 叶子评估基准</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, Consolas, monospace; background: #14171c; color: #d8dee9; padding: 16px; }
+  h1 { font-size: 15px; margin: 0 0 10px; color: #8fbcbb; }
+  #out { white-space: pre-wrap; }
+  .ok { color: #a3be8c } .bad { color: #bf616a } .dim { color: #7b8794 }
+</style>
+</head>
+<body>
+<h1>四子棋 · WebGPU 叶子评估基准（窗口扫描）</h1>
+<pre id="out">pending</pre>
+<script>
+/**
+ * 这个页面把"棋盘评估里最重的那段内层循环"搬到 GPU 上：
+ *
+ *   对每个局面：扫描 180 个"4 连窗口"，按 我方/对手/空 的子数打分并累加。
+ *
+ * 为什么选这个形态？因为它是搜索里**唯一真正适合 GPU 的部分** ——
+ * 每个局面独立、每个窗口独立、控制流完全一致（无分歧），
+ * 而 α-β 树搜索本身是串行的（见 scripts/gpu/README.md）。
+ *
+ * 页面把结果暴露成 `window.__runGpuBench(opts)`，由 run-gpu-bench.mjs 通过 CDP 调用。
+ */
+const out = document.getElementById('out')
+const log = (s) => { out.textContent += s + '\n' }
+
+const N = 9
+const CELLS = N * N
+const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]]
+
+/** 180 个 4 连窗口（每个 4 个格下标）。与 CPU 参考实现共用，保证两边口径一致。 */
+function buildWindows() {
+  const win = []
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      for (const [dr, dc] of DIRS) {
+        const cells = []
+        let ok = true
+        for (let k = 0; k < 4; k++) {
+          const rr = r + dr * k
+          const cc = c + dc * k
+          if (rr < 0 || rr >= N || cc < 0 || cc >= N) { ok = false; break }
+          cells.push(rr * N + cc)
+        }
+        if (ok) win.push(cells)
+      }
+    }
+  }
+  return win
+}
+const WINDOWS = buildWindows()
+const WINDOW_COUNT = WINDOWS.length
+
+/** 可复现的伪随机（与项目其它脚本同一个）。 */
+function mulberry32(seed) {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let t = s
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** 生成一批"像真实中盘"的局面（棋子密度随机、双方交替落子）。 */
+function genPositions(count, seed) {
+  const rng = mulberry32(seed)
+  const boards = new Uint32Array(count * CELLS)
+  for (let p = 0; p < count; p++) {
+    const base = p * CELLS
+    // 密度 0.10 ~ 0.45，双方各占一半左右
+    const density = 0.1 + rng() * 0.35
+    const numStones = Math.floor(CELLS * density)
+    let placed = 0
+    for (let i = 0; i < numStones; i++) {
+      const cell = Math.floor(rng() * CELLS)
+      if (boards[base + cell] !== 0) continue
+      boards[base + cell] = rng() < 0.5 ? 1 : 2
+      placed++
+      if (placed >= numStones) break
+    }
+  }
+  return boards
+}
+
+/**
+ * CPU 参考实现：与 WGSL 逐句对应。
+ *
+ * 打分口径（刻意做得像真实评估，且**全整数** ⇒ 与 GPU 应逐位相同）：
+ *   窗口里只有我方 → +(子数² × 10)，只有对手 → −(子数² × 11)，双方都有 / 空窗 → 0
+ * ⚠️ 用浮点累加会有 f32 舍入误差（实测 ~3e-4），所以这里坚持整数 ——
+ *    真实引擎的评估本来就是整数，GPU 版本也应当位精确。
+ */
+function evalCpu(boards, count) {
+  const score = new Int32Array(count)
+  for (let p = 0; p < count; p++) {
+    const base = p * CELLS
+    let acc = 0
+    for (let w = 0; w < WINDOW_COUNT; w++) {
+      const cells = WINDOWS[w]
+      let mine = 0, theirs = 0
+      for (let k = 0; k < 4; k++) {
+        const v = boards[base + cells[k]]
+        if (v === 1) mine++
+        else if (v === 2) theirs++
+      }
+      if (theirs === 0 && mine > 0) acc += mine * mine * 10
+      else if (mine === 0 && theirs > 0) acc -= theirs * theirs * 11
+    }
+    score[p] = acc
+  }
+  return score
+}
+
+const WGSL = `
+struct Params { count: u32, windowCount: u32, pad0: u32, pad1: u32 };
+@group(0) @binding(0) var<storage, read>       board:   array<u32>;
+@group(0) @binding(1) var<storage, read>       winOff:  array<u32>;
+@group(0) @binding(2) var<storage, read_write> score:   array<i32>;
+@group(0) @binding(3) var<uniform>             params:  Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= params.count) { return; }
+  let base = gid.x * 81u;
+  var acc = 0;
+  for (var w = 0u; w < params.windowCount; w = w + 1u) {
+    var mine = 0u;
+    var theirs = 0u;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let v = board[base + winOff[w * 4u + k]];
+      if (v == 1u) { mine = mine + 1u; }
+      else if (v == 2u) { theirs = theirs + 1u; }
+    }
+    if (theirs == 0u && mine > 0u) {
+      acc = acc + i32(mine * mine) * 10;
+    } else if (mine == 0u && theirs > 0u) {
+      acc = acc - i32(theirs * theirs) * 11;
+    }
+  }
+  score[gid.x] = acc;
+}
+`
+
+let device = null
+let adapterDesc = ''
+
+async function initDevice() {
+  if (device) return device
+  if (!navigator.gpu) throw new Error('这个浏览器没有 navigator.gpu（WebGPU 不可用）')
+  let adapter = await navigator.gpu.requestAdapter()
+  let fallback = false
+  if (!adapter) {
+    adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true })
+    fallback = true
+  }
+  if (!adapter) throw new Error('requestAdapter 返回 null')
+  const info = adapter.info || {}
+  adapterDesc = `${info.vendor || '?'} / ${info.architecture || '?'} / ${info.description || '?'}${fallback ? ' [FALLBACK=软件模拟!]' : ''}`
+  device = await adapter.requestDevice()
+  return device
+}
+
+/** 用指定批大小跑一轮 GPU 评估，返回 {ms, score}。 */
+async function runGpuOnce(boards, count, winOff, dev) {
+  const boardBuf = dev.createBuffer({ size: boards.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+  dev.queue.writeBuffer(boardBuf, 0, boards)
+  const winBuf = dev.createBuffer({ size: winOff.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+  dev.queue.writeBuffer(winBuf, 0, winOff)
+  const scoreBuf = dev.createBuffer({ size: count * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC })
+  const paramsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+  dev.queue.writeBuffer(paramsBuf, 0, new Uint32Array([count, WINDOW_COUNT, 0, 0]))
+
+  const module = dev.createShaderModule({ code: WGSL })
+  const pipeline = dev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } })
+  const bind = dev.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: boardBuf } },
+      { binding: 1, resource: { buffer: winBuf } },
+      { binding: 2, resource: { buffer: scoreBuf } },
+      { binding: 3, resource: { buffer: paramsBuf } },
+    ],
+  })
+  const readBuf = dev.createBuffer({ size: count * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+
+  const t0 = performance.now()
+  const enc = dev.createCommandEncoder()
+  const pass = enc.beginComputePass()
+  pass.setPipeline(pipeline)
+  pass.setBindGroup(0, bind)
+  pass.dispatchWorkgroups(Math.ceil(count / 64))
+  pass.end()
+  enc.copyBufferToBuffer(scoreBuf, 0, readBuf, 0, count * 4)
+  dev.queue.submit([enc.finish()])
+  await readBuf.mapAsync(GPUMapMode.READ)
+  const gpu = new Int32Array(readBuf.getMappedRange().slice(0))
+  readBuf.unmap()
+  const ms = performance.now() - t0
+
+  for (const b of [boardBuf, winBuf, scoreBuf, paramsBuf, readBuf]) b.destroy()
+  return { ms, gpu }
+}
+
+/**
+ * 给"决策级"实验用：从本地 http 服务 fetch 一批**真实的叶子局面**（二进制），
+ * 在 GPU 上打分并回传分数。
+ *
+ * 为什么要走 fetch 而不是直接传字符串：一批叶子最多 6561 个局面 = 2.1 MiB，
+ * 用 base64 塞进 `Runtime.evaluate` 的表达式里又慢又容易爆；二进制走 http 干净得多。
+ * ⚠️ `file://` 下 fetch 被 CORS 挡死 ⇒ 必须由 cdp.mjs 的 startStaticServer 起一个本地服务。
+ *
+ * 返回 { ms（**只算 GPU 部分**，不含 fetch）, fetchMs, bytes, scores: number[] }
+ */
+window.__scoreBoardsFromUrl = async function (url, count, repeats) {
+  const n = repeats || 3
+  const dev = await initDevice()
+  const t0 = performance.now()
+  const buf = await (await fetch(url)).arrayBuffer()
+  const fetchMs = performance.now() - t0
+  const boards = new Uint32Array(buf)
+
+  const winOff = new Uint32Array(WINDOW_COUNT * 4)
+  WINDOWS.forEach((cells, w) => cells.forEach((c, k) => { winOff[w * 4 + k] = c }))
+
+  let best = Infinity
+  let scores = null
+  for (let i = 0; i < n; i++) {
+    const r = await runGpuOnce(boards, count, winOff, dev)
+    if (r.ms < best) { best = r.ms; scores = Array.from(r.gpu) }
+  }
+  return { ms: best, fetchMs, bytes: buf.byteLength, scores }
+}
+
+window.__runGpuBench = async function (opts) {
+  const count = (opts && opts.count) || 65536
+  const repeats = (opts && opts.repeats) || 5
+  const lines = []
+  const report = { adapter: '', count, repeatMs: [], gpuMsPerMpos: 0, cpuMsPerMpos: 0, speedup: 0, exactMatch: false, maxAbsDiff: 0 }
+
+  try {
+    out.textContent = ''
+    const dev = await initDevice()
+    report.adapter = adapterDesc
+    log('adapter: ' + adapterDesc)
+
+    const winOff = new Uint32Array(WINDOW_COUNT * 4)
+    WINDOWS.forEach((cells, w) => cells.forEach((c, k) => { winOff[w * 4 + k] = c }))
+
+    const boards = genPositions(count, 12345)
+    log(`局面数 ${count}（${(count * CELLS * 4 / 1048576).toFixed(1)} MiB 棋盘数据）· 窗口 ${WINDOW_COUNT}/局面`)
+
+    // ---------- 正确性 ----------
+    const cpu = evalCpu(boards, count)
+    const warm = await runGpuOnce(boards, count, winOff, dev)
+    let maxAbsDiff = 0
+    let exact = true
+    let mismatch = 0
+    for (let i = 0; i < count; i++) {
+      const d = Math.abs(cpu[i] - warm.gpu[i])
+      if (d > maxAbsDiff) maxAbsDiff = d
+      if (d !== 0) { exact = false; mismatch++ }
+    }
+    report.exactMatch = exact
+    report.maxAbsDiff = maxAbsDiff
+    log(
+      (exact ? '✅ GPU 与 CPU **逐位一致**' : `❌ GPU 与 CPU 不一致（${mismatch}/${count} 个局面，最大偏差 ${maxAbsDiff}）`) +
+        `（整数累加 ⇒ 期望偏差 0）`,
+    )
+
+    // ---------- 吞吐 ----------
+    const gpuMs = []
+    for (let i = 0; i < repeats; i++) gpuMs.push((await runGpuOnce(boards, count, winOff, dev)).ms)
+    const t1 = performance.now()
+    for (let i = 0; i < 3; i++) evalCpu(boards, count)
+    const cpuMs = (performance.now() - t1) / 3
+
+    const mpos = count / 1e6
+    const gpuBest = Math.min(...gpuMs)
+    report.repeatMs = gpuMs
+    report.gpuMsPerMpos = gpuBest / mpos
+    report.cpuMsPerMpos = cpuMs / mpos
+    report.speedup = cpuMs / gpuBest
+
+    log('')
+    log(`GPU（含上传/回读往返）：${gpuBest.toFixed(2)} ms/批 · ${(gpuBest / mpos).toFixed(2)} ms per 1M 局面`)
+    log(`  ${repeats} 次重复：${gpuMs.map((x) => x.toFixed(2)).join(' / ')} ms`)
+    log(`CPU（同一 JS 实现，单线程）：${cpuMs.toFixed(2)} ms/批 · ${(cpuMs / mpos).toFixed(2)} ms per 1M 局面`)
+    log(`⇒ GPU / CPU 吞吐比：${(cpuMs / gpuBest).toFixed(1)}×`)
+
+    // ---------- 小批量的"发射延迟地板" + 交叉点 ----------
+    log('')
+    log('小批量对比（一次决策只有几千个待评估节点 ⇒ 看交叉点在哪）· 取最小 3 次：')
+    log('     局面数 │  GPU(往返)  │  CPU(同实现)  │  谁赢')
+    const crossover = []
+    for (const c of [1, 81, 512, 4096, 16384, 65536]) {
+      const bb = genPositions(c, 777)
+      let gm = Infinity
+      for (let i = 0; i < 3; i++) gm = Math.min(gm, (await runGpuOnce(bb, c, winOff, dev)).ms)
+      let cm = Infinity
+      for (let i = 0; i < 3; i++) {
+        const t1 = performance.now()
+        evalCpu(bb, c)
+        cm = Math.min(cm, performance.now() - t1)
+      }
+      log(
+        `  ${String(c).padStart(8)} │ ${gm.toFixed(3).padStart(9)} ms │ ${cm.toFixed(3).padStart(11)} ms │ ` +
+          (gm < cm ? 'GPU' : 'CPU'),
+      )
+      crossover.push({ count: c, gpuMs: gm, cpuMs: cm })
+    }
+    report.crossover = crossover
+    log('')
+    log('📌 结论：GPU 只在"批量 ≥ 数万局面"时赢；单次决策（几千节点）光是 3ms 往返就亏一大截。')
+    log('   α-β 搜索是串行的，没法把一次决策展开成这种批量 —— 所以本项不接入搜索热路径。')
+    return { ok: true, adapter: adapterDesc, lines: lines.concat(out.textContent.split('\n')), report }
+  } catch (e) {
+    log('ERROR: ' + (e && e.message))
+    return { ok: false, adapter: adapterDesc, error: String(e && e.message), lines: out.textContent.split('\n'), report }
+  }
+}
+
+// 直接双击打开这个文件时自动跑一遍默认基准（方便肉眼看结果）；
+// 由 run-gpu-bench.mjs 驱动时不自动跑（它自己控制参数，避免重复计算）。
+if (location.hash === '#auto') {
+  setTimeout(() => { window.__runGpuBench({ count: 65536, repeats: 5 }) }, 0)
+}
+</script>
+</body>
+</html>

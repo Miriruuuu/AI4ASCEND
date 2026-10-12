@@ -1,0 +1,9 @@
+# back/ 是一个可以独立部署的项目，因此在这里放一份**自己的** pnpm 工作区配置：
+# pnpm 会把它当作工作区根，不再向上使用仓库根目录的 pnpm-workspace.yaml。
+packages:
+  - '.'
+
+# pnpm 12 起，"允许执行构建脚本"的依赖白名单迁移到该文件。
+# esbuild（tsx / vitest 依赖）需要在安装后执行 postinstall 以落地平台二进制。
+allowBuilds:
+  esbuild: true

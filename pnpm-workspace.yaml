@@ -1,0 +1,4 @@
+# pnpm 11/12 起，“允许执行构建脚本”的依赖白名单迁移到该文件。
+# esbuild（vite 依赖）需要在安装后执行 postinstall 以落地平台二进制。
+allowBuilds:
+  esbuild: true
